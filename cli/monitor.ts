@@ -305,9 +305,58 @@ class Monitor {
 
   private async disbandTeam() {
     try {
+      // Fetch final messages BEFORE disbanding
+      await this.fetchMessages()
       await apiPost(`/api/orchestra/teams/${this.teamId}/disband`, {})
       this.cleanup()
-      console.log(`\n${color.yellow}Team disbanded.${color.reset}\n`)
+
+      // Show summary
+      const agentMsgs = this.messages.filter(m => m.from !== 'orchestra' && m.from !== 'user')
+      const agents = [...new Set(agentMsgs.map(m => m.from))]
+      const duration = this.formatDuration(Date.now() - this.startTime)
+
+      console.log()
+      console.log(`  ${color.bold}${color.brightWhite}◈ ensemble — session summary${color.reset}`)
+      console.log(`  ${color.dim}${duration} · ${agentMsgs.length} messages · ${agents.length} agents${color.reset}`)
+      console.log()
+
+      if (this.team?.description) {
+        console.log(`  ${color.dim}Task: ${this.team.description.slice(0, 100)}${color.reset}`)
+        console.log()
+      }
+
+      for (const agent of agents) {
+        const msgs = agentMsgs.filter(m => m.from === agent)
+        const style = getAgentStyle(agent)
+        console.log(`  ${style.badge}${color.bold} ${agent} ${color.reset} ${color.dim}(${msgs.length} messages)${color.reset}`)
+
+        // Show first message (plan) and last message (conclusion)
+        if (msgs.length > 0) {
+          const first = msgs[0].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
+          console.log(`  ${color.dim}Start:${color.reset} ${style.text}${first.slice(0, 120)}${first.length > 120 ? '...' : ''}${color.reset}`)
+        }
+        if (msgs.length > 1) {
+          const last = msgs[msgs.length - 1].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
+          console.log(`  ${color.dim}Eind:${color.reset}  ${style.text}${last.slice(0, 120)}${last.length > 120 ? '...' : ''}${color.reset}`)
+        }
+        console.log()
+      }
+
+      // Save summary to file for the Claude session to pick up
+      const summaryFile = `/tmp/collab-summary-${this.teamId}.txt`
+      const summaryText = agents.map(agent => {
+        const msgs = agentMsgs.filter(m => m.from === agent)
+        const first = msgs[0]?.content.replace(/\/tmp\/orchestra-msgs/g, '').trim() || ''
+        const last = msgs[msgs.length - 1]?.content.replace(/\/tmp\/orchestra-msgs/g, '').trim() || ''
+        return `${agent} (${msgs.length} msgs):\n  Start: ${first.slice(0, 300)}\n  Eind: ${last.slice(0, 500)}`
+      }).join('\n\n')
+
+      const fs = await import('fs')
+      fs.writeFileSync(summaryFile, `Task: ${this.team?.description || 'unknown'}\nDuration: ${duration}\nMessages: ${agentMsgs.length}\n\n${summaryText}`)
+
+      console.log(`  ${color.dim}Summary saved: ${summaryFile}${color.reset}`)
+      console.log()
+
       process.exit(0)
     } catch { /* ignore */ }
   }
