@@ -167,6 +167,18 @@ class Monitor {
   private cols = process.stdout.columns || 120
   private rows = process.stdout.rows || 40
   private startTime = Date.now()
+  private completionMenuActive = false
+  private completionMenuSelection = 0
+  private showInlineSummary = false
+  private idleSuppressedUntil = 0
+  private readonly IDLE_THRESHOLD_MS = 60_000
+
+  private readonly completionMenuOptions = [
+    { label: 'Samenvatting tonen', icon: '📋' },
+    { label: 'Team door laten werken', icon: '▶' },
+    { label: 'Bijsturen met nieuw doel', icon: '✎' },
+    { label: 'Disband team', icon: '✕' },
+  ]
 
   constructor(private teamId: string) {}
 
@@ -201,7 +213,26 @@ class Monitor {
         if (this.messages.length !== this.lastMessageCount) {
           this.lastMessageCount = this.messages.length
           this.scrollOffset = 0 // auto-scroll to bottom
+          // Dismiss completion menu when new activity arrives
+          if (this.completionMenuActive) {
+            this.completionMenuActive = false
+            this.completionMenuSelection = 0
+          }
           this.render()
+        } else if (
+          !this.completionMenuActive &&
+          !this.inputMode &&
+          !this.showInlineSummary &&
+          this.messages.length > 0
+        ) {
+          // Check idle based on last agent message timestamp
+          const lastAgentMsg = this.getLastAgentMessageTime()
+          const now = Date.now()
+          if (lastAgentMsg > 0 && now - lastAgentMsg >= this.IDLE_THRESHOLD_MS && now > this.idleSuppressedUntil) {
+            this.completionMenuActive = true
+            this.completionMenuSelection = 0
+            this.render()
+          }
         }
       } catch { /* connection lost, will retry */ }
     }, 2000)
@@ -222,6 +253,33 @@ class Monitor {
     if (key === '\x03') {
       this.cleanup()
       process.exit(0)
+    }
+
+    // Completion menu navigation
+    if (this.completionMenuActive) {
+      if (key === '\x1b[A') { // Up arrow
+        this.completionMenuSelection = Math.max(0, this.completionMenuSelection - 1)
+        this.render()
+      } else if (key === '\x1b[B') { // Down arrow
+        this.completionMenuSelection = Math.min(this.completionMenuOptions.length - 1, this.completionMenuSelection + 1)
+        this.render()
+      } else if (key === '\r' || key === '\n') { // Enter — select
+        this.handleCompletionChoice(this.completionMenuSelection)
+      } else if (key === '\x1b') { // Escape — dismiss menu
+        this.completionMenuActive = false
+        this.completionMenuSelection = 0
+        this.render()
+      }
+      return
+    }
+
+    // Inline summary dismiss
+    if (this.showInlineSummary) {
+      if (key === '\x1b' || key === 'q' || key === 'Q') {
+        this.showInlineSummary = false
+        this.render()
+      }
+      return
     }
 
     if (this.inputMode) {
@@ -308,41 +366,12 @@ class Monitor {
       // Fetch final messages BEFORE disbanding
       await this.fetchMessages()
       await apiPost(`/api/orchestra/teams/${this.teamId}/disband`, {})
-      this.cleanup()
 
-      // Show summary
+      // Save summary to file — the main Claude session will present it
       const agentMsgs = this.messages.filter(m => m.from !== 'orchestra' && m.from !== 'user')
       const agents = [...new Set(agentMsgs.map(m => m.from))]
       const duration = this.formatDuration(Date.now() - this.startTime)
 
-      console.log()
-      console.log(`  ${color.bold}${color.brightWhite}◈ ensemble — session summary${color.reset}`)
-      console.log(`  ${color.dim}${duration} · ${agentMsgs.length} messages · ${agents.length} agents${color.reset}`)
-      console.log()
-
-      if (this.team?.description) {
-        console.log(`  ${color.dim}Task: ${this.team.description.slice(0, 100)}${color.reset}`)
-        console.log()
-      }
-
-      for (const agent of agents) {
-        const msgs = agentMsgs.filter(m => m.from === agent)
-        const style = getAgentStyle(agent)
-        console.log(`  ${style.badge}${color.bold} ${agent} ${color.reset} ${color.dim}(${msgs.length} messages)${color.reset}`)
-
-        // Show first message (plan) and last message (conclusion)
-        if (msgs.length > 0) {
-          const first = msgs[0].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
-          console.log(`  ${color.dim}Start:${color.reset} ${style.text}${first.slice(0, 120)}${first.length > 120 ? '...' : ''}${color.reset}`)
-        }
-        if (msgs.length > 1) {
-          const last = msgs[msgs.length - 1].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
-          console.log(`  ${color.dim}Eind:${color.reset}  ${style.text}${last.slice(0, 120)}${last.length > 120 ? '...' : ''}${color.reset}`)
-        }
-        console.log()
-      }
-
-      // Save summary to file for the Claude session to pick up
       const summaryFile = `/tmp/collab-summary-${this.teamId}.txt`
       const summaryText = agents.map(agent => {
         const msgs = agentMsgs.filter(m => m.from === agent)
@@ -354,11 +383,42 @@ class Monitor {
       const fs = await import('fs')
       fs.writeFileSync(summaryFile, `Task: ${this.team?.description || 'unknown'}\nDuration: ${duration}\nMessages: ${agentMsgs.length}\n\n${summaryText}`)
 
-      console.log(`  ${color.dim}Summary saved: ${summaryFile}${color.reset}`)
-      console.log()
-
+      // Exit cleanly — summary will appear in main session
+      this.cleanup()
       process.exit(0)
     } catch { /* ignore */ }
+  }
+
+  private getLastAgentMessageTime(): number {
+    const agentMsgs = this.messages.filter(m => m.from !== 'orchestra' && m.from !== 'user')
+    if (agentMsgs.length === 0) return 0
+    const last = agentMsgs[agentMsgs.length - 1]
+    return new Date(last.timestamp).getTime()
+  }
+
+  private handleCompletionChoice(choice: number) {
+    this.completionMenuActive = false
+    this.completionMenuSelection = 0
+
+    switch (choice) {
+      case 0: // Samenvatting tonen
+        this.showInlineSummary = true
+        this.render()
+        break
+      case 1: // Team door laten werken — suppress menu for another 60s
+        this.idleSuppressedUntil = Date.now() + this.IDLE_THRESHOLD_MS
+        this.render()
+        break
+      case 2: // Bijsturen met nieuw doel
+        this.inputMode = true
+        this.inputTarget = 'team'
+        this.inputBuffer = ''
+        this.render()
+        break
+      case 3: // Disband team
+        this.disbandTeam()
+        break
+    }
   }
 
   private cleanup() {
@@ -388,11 +448,22 @@ class Monitor {
     // ── Separator ──
     out.push(`${color.gray}${'─'.repeat(w)}${color.reset}`)
 
-    // ── Messages ──
+    // ── Inline Summary (replaces messages area when active) ──
     const headerHeight = 4
+    const completionMenuHeight = this.completionMenuActive ? 8 : 0
     const footerHeight = this.inputMode ? 4 : 3
-    const messageAreaHeight = h - headerHeight - footerHeight
-    out.push(this.renderMessages(w, messageAreaHeight))
+    const messageAreaHeight = h - headerHeight - footerHeight - completionMenuHeight
+
+    if (this.showInlineSummary) {
+      out.push(this.renderInlineSummary(w, messageAreaHeight))
+    } else {
+      out.push(this.renderMessages(w, messageAreaHeight))
+    }
+
+    // ── Completion Menu ──
+    if (this.completionMenuActive) {
+      out.push(this.renderCompletionMenu(w))
+    }
 
     // ── Footer ──
     out.push(this.renderFooter(w))
@@ -547,6 +618,109 @@ class Monitor {
     }
 
     return lines.join('')
+  }
+
+  private renderCompletionMenu(w: number): string {
+    const lines: string[] = []
+    const boxW = Math.min(52, w - 4)
+    const innerW = boxW - 4 // account for "│ " and " │"
+
+    // Top border
+    lines.push(`${color.dim}  ┌${'─'.repeat(boxW - 2)}┐${color.reset}\n`)
+
+    // Title
+    const title = '⏳ Agents idle — what next?'
+    const titlePad = Math.max(0, innerW - title.length)
+    lines.push(
+      `${color.dim}  │${color.reset} ${color.bold}${color.brightYellow}${title}${color.reset}` +
+      `${' '.repeat(titlePad)}${color.dim} │${color.reset}\n`
+    )
+
+    // Separator
+    lines.push(`${color.dim}  ├${'─'.repeat(boxW - 2)}┤${color.reset}\n`)
+
+    // Options
+    for (let i = 0; i < this.completionMenuOptions.length; i++) {
+      const opt = this.completionMenuOptions[i]
+      const isSelected = i === this.completionMenuSelection
+      const marker = isSelected ? `${color.brightWhite}${color.bold}▸` : `${color.dim} `
+      const label = isSelected
+        ? `${color.brightWhite}${color.bold}${opt.icon}  ${opt.label}`
+        : `${color.gray}${opt.icon}  ${opt.label}`
+      const labelLen = opt.icon.length + 2 + opt.label.length + (isSelected ? 1 : 1)
+      const pad = Math.max(0, innerW - labelLen)
+      lines.push(
+        `${color.dim}  │${color.reset} ${marker} ${label}${color.reset}` +
+        `${' '.repeat(pad)}${color.dim}│${color.reset}\n`
+      )
+    }
+
+    // Bottom border with hints
+    lines.push(`${color.dim}  ├${'─'.repeat(boxW - 2)}┤${color.reset}\n`)
+    const hints = '↑↓ navigate  ⏎ select  ESC dismiss'
+    const hintsPad = Math.max(0, innerW - hints.length)
+    lines.push(
+      `${color.dim}  │ ${hints}${' '.repeat(hintsPad)} │${color.reset}\n`
+    )
+    lines.push(`${color.dim}  └${'─'.repeat(boxW - 2)}┘${color.reset}\n`)
+
+    return lines.join('')
+  }
+
+  private renderInlineSummary(w: number, maxLines: number): string {
+    const lines: string[] = []
+
+    lines.push(`\n`)
+    lines.push(
+      `  ${color.bold}${color.brightWhite}◈ Session Summary${color.reset}` +
+      `${color.dim}  (press ESC or q to return)${color.reset}\n`
+    )
+    lines.push(`${color.gray}${'─'.repeat(w)}${color.reset}\n`)
+
+    const agentMsgs = this.messages.filter(m => m.from !== 'orchestra' && m.from !== 'user')
+    const agents = [...new Set(agentMsgs.map(m => m.from))]
+    const duration = this.formatDuration(Date.now() - this.startTime)
+
+    lines.push(
+      `  ${color.dim}${duration} · ${agentMsgs.length} messages · ${agents.length} agents${color.reset}\n`
+    )
+
+    if (this.team?.description) {
+      const desc = this.team.description.length > w - 10
+        ? this.team.description.slice(0, w - 13) + '...'
+        : this.team.description
+      lines.push(`  ${color.dim}Task:${color.reset} ${desc}\n`)
+    }
+
+    lines.push(`\n`)
+
+    for (const agent of agents) {
+      const msgs = agentMsgs.filter(m => m.from === agent)
+      const style = getAgentStyle(agent)
+      lines.push(
+        `  ${style.badge}${color.bold} ${agent} ${color.reset}` +
+        ` ${color.dim}(${msgs.length} messages)${color.reset}\n`
+      )
+
+      if (msgs.length > 0) {
+        const first = msgs[0].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
+        const firstTrunc = first.slice(0, w - 14) + (first.length > w - 14 ? '...' : '')
+        lines.push(`  ${color.dim}Start:${color.reset} ${style.text}${firstTrunc}${color.reset}\n`)
+      }
+      if (msgs.length > 1) {
+        const last = msgs[msgs.length - 1].content.replace(/\/tmp\/orchestra-msgs/g, '').trim()
+        const lastTrunc = last.slice(0, w - 14) + (last.length > w - 14 ? '...' : '')
+        lines.push(`  ${color.dim}Eind:${color.reset}  ${style.text}${lastTrunc}${color.reset}\n`)
+      }
+      lines.push(`\n`)
+    }
+
+    // Pad remaining lines
+    while (lines.length < maxLines) {
+      lines.push(`\n`)
+    }
+
+    return lines.slice(0, maxLines).join('')
   }
 
   // ─── HELPERS ────────────────────────────────────────────────────────
