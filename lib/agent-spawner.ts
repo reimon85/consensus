@@ -7,6 +7,7 @@
 import { v4 as uuidv4 } from 'uuid'
 import { getRuntime } from './agent-runtime'
 import { getSelfHostId } from './hosts-config'
+import { buildAgentCommand } from './agent-config'
 
 export interface SpawnedAgent {
   id: string
@@ -29,14 +30,9 @@ function computeSessionName(agentName: string): string {
   return agentName.replace(/[^a-zA-Z0-9\-_.]/g, '')
 }
 
-/** Resolve program name to CLI command */
+/** Resolve program name to CLI command using agents.json config */
 function resolveStartCommand(program: string): string {
-  const p = program.toLowerCase()
-  if (p.includes('codex')) return 'codex --full-auto -m gpt-5.4'
-  if (p.includes('claude')) return 'claude --dangerously-skip-permissions'
-  if (p.includes('aider')) return 'aider'
-  if (p.includes('gemini')) return 'gemini'
-  return 'claude --dangerously-skip-permissions'
+  return buildAgentCommand(program)
 }
 
 /**

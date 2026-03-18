@@ -11,6 +11,7 @@
 
 import http from 'http'
 import readline from 'readline'
+import { resolveAgentProgram } from '../lib/agent-config'
 
 // ─────────────────────────── ANSI ESCAPE CODES ───────────────────────────
 
@@ -77,20 +78,24 @@ interface AgentStyle {
 }
 
 const agentStyles: Record<string, AgentStyle> = {
-  codex: { badge: `${color.bgBlue}${color.brightWhite}`, text: color.brightBlue, icon: '◆' },
-  claude: { badge: `${color.bgGreen}${color.brightWhite}`, text: color.brightGreen, icon: '●' },
-  aider: { badge: `${color.bgMagenta}${color.brightWhite}`, text: color.brightMagenta, icon: '▲' },
-  gemini: { badge: `${color.bgYellow}${color.black}`, text: color.brightYellow, icon: '★' },
   orchestra: { badge: `${color.bgGray}${color.brightWhite}`, text: color.gray, icon: '⚙' },
   user: { badge: `${color.bgCyan}${color.black}`, text: color.brightCyan, icon: '▸' },
 }
 
+const programColorStyles: Record<string, Omit<AgentStyle, 'icon'>> = {
+  blue: { badge: `${color.bgBlue}${color.brightWhite}`, text: color.brightBlue },
+  green: { badge: `${color.bgGreen}${color.brightWhite}`, text: color.brightGreen },
+  magenta: { badge: `${color.bgMagenta}${color.brightWhite}`, text: color.brightMagenta },
+  yellow: { badge: `${color.bgYellow}${color.black}`, text: color.brightYellow },
+  white: { badge: `${color.bgWhite}${color.black}`, text: color.white },
+}
+
 function getAgentStyle(name: string): AgentStyle {
-  const lower = name.toLowerCase()
-  for (const [key, style] of Object.entries(agentStyles)) {
-    if (lower.includes(key)) return style
-  }
-  return { badge: `${color.bgWhite}${color.black}`, text: color.white, icon: '○' }
+  if (name === 'orchestra' || name === 'user') return agentStyles[name]
+
+  const program = resolveAgentProgram(name)
+  const style = programColorStyles[program.color] || programColorStyles.white
+  return { ...style, icon: program.icon }
 }
 
 // ─────────────────────────── API CLIENT ──────────────────────────────────

@@ -1,0 +1,38 @@
+{
+  "codex": {
+    "name": "codex",
+    "command": "codex",
+    "flags": ["-m", "gpt-5.4"],
+    "readyMarker": "›",
+    "inputMethod": "pasteFromFile",
+    "color": "blue",
+    "icon": "◆"
+  },
+  "claude": {
+    "name": "claude",
+    "command": "claude",
+    "flags": [],
+    "readyMarker": "❯",
+    "inputMethod": "sendKeys",
+    "color": "green",
+    "icon": "●"
+  },
+  "aider": {
+    "name": "aider",
+    "command": "aider",
+    "flags": [],
+    "readyMarker": "❯",
+    "inputMethod": "sendKeys",
+    "color": "magenta",
+    "icon": "▲"
+  },
+  "gemini": {
+    "name": "gemini",
+    "command": "gemini",
+    "flags": [],
+    "readyMarker": "❯",
+    "inputMethod": "sendKeys",
+    "color": "yellow",
+    "icon": "★"
+  }
+}

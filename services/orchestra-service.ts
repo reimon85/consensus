@@ -17,6 +17,7 @@ import {
 } from '../lib/agent-spawner'
 import { isSelf, getHostById, getSelfHostId } from '../lib/hosts-config'
 import { getRuntime } from '../lib/agent-runtime'
+import { resolveAgentProgram } from '../lib/agent-config'
 import fs from 'fs'
 
 interface ServiceResult<T> {
@@ -24,6 +25,90 @@ interface ServiceResult<T> {
   error?: string
   status: number
 }
+
+const IDLE_DISBAND_THRESHOLD_MS = 60_000
+const IDLE_CHECK_INTERVAL_MS = 15_000
+const COMPLETION_PATTERNS = [
+  /\bafgerond\b/i,
+  /\bdone\b/i,
+  /\bcomplete(?:d)?\b/i,
+  /\bklaar\b/i,
+  /\btot de volgende\b/i,
+]
+
+class OrchestraService {
+  private readonly disbandingTeams = new Set<string>()
+  private readonly idleCheckTimer: NodeJS.Timeout
+
+  constructor() {
+    this.idleCheckTimer = setInterval(() => {
+      void this.checkIdleTeams()
+    }, IDLE_CHECK_INTERVAL_MS)
+    this.idleCheckTimer.unref()
+
+    for (const signal of ['SIGINT', 'SIGTERM', 'beforeExit', 'exit'] as const) {
+      process.once(signal, () => this.stop())
+    }
+  }
+
+  async checkIdleTeams(): Promise<void> {
+    const teams = loadTeams().filter(team => team.status === 'active')
+
+    for (const team of teams) {
+      if (this.disbandingTeams.has(team.id)) continue
+      if (!this.shouldAutoDisband(team)) continue
+
+      this.disbandingTeams.add(team.id)
+
+      try {
+        appendMessage(team.id, {
+          id: uuidv4(),
+          teamId: team.id,
+          from: 'orchestra',
+          to: 'team',
+          content: 'Auto-disband triggered after 60s idle and completion-like agent messages',
+          type: 'chat',
+          timestamp: new Date().toISOString(),
+        })
+
+        writeDisbandSummary(team.id)
+        await disbandTeam(team.id)
+      } catch (err) {
+        console.error(`[Orchestra] Auto-disband failed for ${team.id}:`, err)
+      } finally {
+        this.disbandingTeams.delete(team.id)
+      }
+    }
+  }
+
+  private shouldAutoDisband(team: OrchestraTeam): boolean {
+    const messages = getMessages(team.id)
+    const nonOrchestraMessages = messages.filter(message => message.from !== 'orchestra')
+    const lastMessage = nonOrchestraMessages[nonOrchestraMessages.length - 1]
+    if (!lastMessage) return false
+
+    const idleForMs = Date.now() - new Date(lastMessage.timestamp).getTime()
+    if (idleForMs <= IDLE_DISBAND_THRESHOLD_MS) return false
+
+    const activeAgents = team.agents.filter(agent => agent.status === 'active')
+    if (activeAgents.length === 0) return false
+
+    return activeAgents.every(agent => {
+      const lastAgentMessage = [...messages].reverse().find(message => message.from === agent.name)
+      return Boolean(lastAgentMessage && this.hasCompletionSignal(lastAgentMessage.content))
+    })
+  }
+
+  private hasCompletionSignal(content: string): boolean {
+    return COMPLETION_PATTERNS.some(pattern => pattern.test(content))
+  }
+
+  private stop(): void {
+    clearInterval(this.idleCheckTimer)
+  }
+}
+
+const orchestraService = new OrchestraService()
 
 async function routeToHost(_program: string, preferredHostId?: string): Promise<string> {
   if (preferredHostId) {
@@ -56,8 +141,6 @@ export async function createOrchestraTeam(
       `Start NOW: greet your teammate with team-say, then begin.`,
     ].join(' ')
   }
-
-  const isCodex = (program: string) => program.toLowerCase().includes('codex')
 
   // Phase 1: Spawn all agents
   for (let i = 0; i < team.agents.length; i++) {
@@ -120,7 +203,8 @@ export async function createOrchestraTeam(
       sessionName: string, program: string, hostId?: string, maxWait = 60000,
     ): Promise<boolean> => {
       const start = Date.now()
-      const readyMarker = isCodex(program) ? '›' : '❯'
+      const agentConfig = resolveAgentProgram(program)
+      const readyMarker = agentConfig.readyMarker
       while (Date.now() - start < maxWait) {
         try {
           if (hostId && !isSelf(hostId)) {
@@ -185,11 +269,14 @@ export async function createOrchestraTeam(
               const prompt = fs.readFileSync(promptFile, 'utf-8')
               await postRemoteSessionCommand(host.url, sessionName, prompt)
             }
-          } else if (isCodex(agent.program)) {
-            await runtime.pasteFromFile(sessionName, promptFile)
           } else {
-            const prompt = fs.readFileSync(promptFile, 'utf-8')
-            await runtime.sendKeys(sessionName, prompt, { literal: true, enter: true })
+            const agentCfg = resolveAgentProgram(agent.program)
+            if (agentCfg.inputMethod === 'pasteFromFile') {
+              await runtime.pasteFromFile(sessionName, promptFile)
+            } else {
+              const prompt = fs.readFileSync(promptFile, 'utf-8')
+              await runtime.sendKeys(sessionName, prompt, { literal: true, enter: true })
+            }
           }
           console.log(`[Orchestra] ✓ Prompt injected into ${sessionName}`)
         } catch (err) {
@@ -224,6 +311,10 @@ export function listOrchestraTeams(): ServiceResult<{ teams: OrchestraTeam[] }> 
   return { data: { teams: loadTeams() }, status: 200 }
 }
 
+export async function checkIdleTeams(): Promise<void> {
+  await orchestraService.checkIdleTeams()
+}
+
 export function getTeamFeed(teamId: string, since?: string): ServiceResult<{ messages: OrchestraMessage[] }> {
   const team = getTeam(teamId)
   if (!team) return { error: 'Team not found', status: 404 }
@@ -249,7 +340,6 @@ export async function sendTeamMessage(
     : team.agents.filter(a => a.status === 'active' && a.name === to)
 
   const runtime = getRuntime()
-  const isCodex = (program: string) => program.toLowerCase().includes('codex')
 
   for (const targetAgent of recipients) {
     try {
@@ -263,13 +353,15 @@ export async function sendTeamMessage(
       if (targetAgent.hostId && !isSelf(targetAgent.hostId)) {
         const host = getHostById(targetAgent.hostId)
         if (host) await postRemoteSessionCommand(host.url, sessionName, deliveryText)
-      } else if (isCodex(targetAgent.program)) {
-        // Codex works better with paste-buffer for multi-line input
-        const tmpFile = `/tmp/orchestra-delivery-${sessionName}.txt`
-        fs.writeFileSync(tmpFile, deliveryText)
-        await runtime.pasteFromFile(sessionName, tmpFile)
       } else {
-        await runtime.sendKeys(sessionName, deliveryText, { literal: true, enter: true })
+        const agentCfg = resolveAgentProgram(targetAgent.program)
+        if (agentCfg.inputMethod === 'pasteFromFile') {
+          const tmpFile = `/tmp/orchestra-delivery-${sessionName}.txt`
+          fs.writeFileSync(tmpFile, deliveryText)
+          await runtime.pasteFromFile(sessionName, tmpFile)
+        } else {
+          await runtime.sendKeys(sessionName, deliveryText, { literal: true, enter: true })
+        }
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
@@ -282,6 +374,43 @@ export async function sendTeamMessage(
   }
 
   return { data: { message }, status: 200 }
+}
+
+/**
+ * Write a summary file for a disbanded team — used by auto-disband and can be
+ * picked up by the background watcher in the Claude Code session.
+ * Mirrors the format from cli/monitor.ts disbandTeam().
+ */
+export function writeDisbandSummary(teamId: string): void {
+  const team = getTeam(teamId)
+  if (!team) return
+
+  const messages = getMessages(teamId)
+  const agentMsgs = messages.filter(m => m.from !== 'orchestra' && m.from !== 'user')
+  if (agentMsgs.length === 0) return
+
+  const now = new Date()
+  const createdAt = new Date(team.createdAt)
+  const durationMs = now.getTime() - createdAt.getTime()
+  const durationMin = Math.round(durationMs / 60000)
+  const duration = durationMin >= 60
+    ? `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`
+    : `${durationMin}m`
+
+  const agents = [...new Set(agentMsgs.map(m => m.from))]
+  const summaryText = agents.map(agent => {
+    const msgs = agentMsgs.filter(m => m.from === agent)
+    const first = msgs[0]?.content.replace(/\/tmp\/orchestra-msgs/g, '').trim() || ''
+    const last = msgs[msgs.length - 1]?.content.replace(/\/tmp\/orchestra-msgs/g, '').trim() || ''
+    return `${agent} (${msgs.length} msgs):\n  Start: ${first.slice(0, 300)}\n  Eind: ${last.slice(0, 500)}`
+  }).join('\n\n')
+
+  const summaryFile = `/tmp/collab-summary-${teamId}.txt`
+  fs.writeFileSync(
+    summaryFile,
+    `Task: ${team.description || 'unknown'}\nDuration: ${duration}\nMessages: ${agentMsgs.length}\n\n${summaryText}`,
+  )
+  console.log(`[Orchestra] Summary written to ${summaryFile}`)
 }
 
 export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team: OrchestraTeam }>> {
