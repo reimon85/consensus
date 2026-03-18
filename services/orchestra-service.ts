@@ -87,7 +87,13 @@ class OrchestraService {
     const lastMessage = nonOrchestraMessages[nonOrchestraMessages.length - 1]
     if (!lastMessage) return false
 
-    const idleForMs = Date.now() - new Date(lastMessage.timestamp).getTime()
+    // Robust timestamp handling: skip idle check if no timestamp available
+    const lastTimestamp = lastMessage.timestamp
+      ? new Date(lastMessage.timestamp).getTime()
+      : NaN
+    if (Number.isNaN(lastTimestamp)) return false
+
+    const idleForMs = Date.now() - lastTimestamp
     if (idleForMs <= IDLE_DISBAND_THRESHOLD_MS) return false
 
     const activeAgents = team.agents.filter(agent => agent.status === 'active')

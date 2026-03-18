@@ -76,12 +76,36 @@ export function appendMessage(teamId: string, message: OrchestraMessage): void {
 }
 
 export function getMessages(teamId: string, since?: string): OrchestraMessage[] {
-  const file = path.join(MESSAGES_DIR, teamId, 'feed.jsonl')
-  if (!fs.existsSync(file)) return []
-  const lines = fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean)
-  let messages = lines.map(l => JSON.parse(l) as OrchestraMessage)
+  const sources = [
+    path.join(MESSAGES_DIR, teamId, 'feed.jsonl'),
+    path.join('/tmp/orchestra-msgs', `${teamId}.jsonl`),
+  ]
+
+  const seenIds = new Set<string>()
+  let messages: OrchestraMessage[] = []
+
+  for (const file of sources) {
+    if (!fs.existsSync(file)) continue
+    const lines = fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean)
+    for (const line of lines) {
+      const msg = JSON.parse(line) as OrchestraMessage
+      const dedupeKey = msg.id || `${msg.from}:${msg.timestamp}:${msg.content?.slice(0, 50)}`
+      if (!seenIds.has(dedupeKey)) {
+        seenIds.add(dedupeKey)
+        messages.push(msg)
+      }
+    }
+  }
+
+  // Sort by timestamp (messages without timestamp go to the end)
+  messages.sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : Infinity
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : Infinity
+    return ta - tb
+  })
+
   if (since) {
-    messages = messages.filter(m => m.timestamp > since)
+    messages = messages.filter(m => m.timestamp && m.timestamp > since)
   }
   return messages
 }
