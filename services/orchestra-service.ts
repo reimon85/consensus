@@ -29,6 +29,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { spawn } from 'child_process'
 import { createWorktree, mergeWorktree, destroyWorktree, type WorktreeInfo } from '../lib/worktree-manager'
+import { runStagedWorkflow } from '../lib/staged-workflow'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -434,45 +435,92 @@ export async function createOrchestraTeam(
 
     await new Promise(r => setTimeout(r, 2000))
 
-    // Phase 3: Inject prompts simultaneously
-    console.log(`[Orchestra] All ${ready.length} agents ready — injecting prompts simultaneously`)
-    await Promise.all(
-      ready.map(async ({ agent, sessionName }) => {
-        const promptFile = collabPromptFile(team.id, agent.name)
-        try {
-          if (agent.hostId && !isSelf(agent.hostId)) {
-            const host = getHostById(agent.hostId)
-            if (host) {
-              const prompt = fs.readFileSync(promptFile, 'utf-8')
-              await postRemoteSessionCommand(host.url, sessionName, prompt)
-            }
-          } else {
-            const agentCfg = resolveAgentProgram(agent.program)
-            if (agentCfg.inputMethod === 'pasteFromFile') {
-              await runtime.pasteFromFile(sessionName, promptFile)
-            } else {
-              const prompt = fs.readFileSync(promptFile, 'utf-8')
-              await runtime.sendKeys(sessionName, prompt, { literal: true, enter: true })
-            }
-          }
-          console.log(`[Orchestra] ✓ Prompt injected into ${sessionName}`)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          appendMessage(team.id, {
-            id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
-            content: `❌ Delivery to ${agent.name} failed: ${message}`,
-            type: 'chat', timestamp: new Date().toISOString(),
-          })
-          console.error(`[Orchestra] ✗ Failed to inject prompt into ${sessionName}:`, err)
-        }
+    // Phase 3: Inject prompts (skip if staged — staged workflow handles its own prompts)
+    if (request.staged) {
+      // Staged mode: skip normal prompt injection, run plan→exec→verify workflow
+      appendMessage(team.id, {
+        id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
+        content: `🚀 All ${ready.length} agents ready — starting staged workflow (plan → exec → verify)`,
+        type: 'chat', timestamp: new Date().toISOString(),
       })
-    )
 
-    appendMessage(team.id, {
-      id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
-      content: `🚀 All ${ready.length} agents received their task — collaboration started`,
-      type: 'chat', timestamp: new Date().toISOString(),
-    })
+      const buildStagedPlanPrompt = (agentName: string, otherNames: string[], agentIndex: number): string => [
+        buildPrompt(agentName, otherNames, agentIndex),
+        `STAGED WORKFLOW MODE.`,
+        `PHASE 1 PLAN: ONLY create and share a plan via team-say.`,
+        `Do NOT write code, edit files, or run mutating commands yet.`,
+        `Both agents must share their plan before implementation begins.`,
+        `After sharing your plan, run team-read and align on the execution approach.`,
+      ].join(' ')
+
+      const buildStagedExecPrompt = (otherNames: string[]): string => [
+        `PHASE 2 EXEC: Planning is complete.`,
+        `You may now execute the agreed plan and make code changes.`,
+        `Share concrete progress via team-say and explicitly report when your implementation is done.`,
+        `Keep coordinating with ${otherNames.join(', ')} as you work.`,
+      ].join(' ')
+
+      const buildStagedVerifyPrompt = (teammateToReview?: string): string => [
+        `PHASE 3 VERIFY: Review ${teammateToReview || 'your teammate'}'s work.`,
+        `Inspect what they changed, compare it against the plan, and report findings via team-say.`,
+        `Focus on bugs, regressions, missing tests, and mismatches with the agreed approach.`,
+      ].join(' ')
+
+      // Run in background so createOrchestraTeam returns immediately
+      runStagedWorkflow(team, request.stagedConfig, {
+        buildPlanPrompt: ({ agent, teammates, index }) => buildStagedPlanPrompt(agent.name, teammates, index),
+        buildExecPrompt: ({ teammates }) => buildStagedExecPrompt(teammates),
+        buildVerifyPrompt: ({ teammateToReview }) => buildStagedVerifyPrompt(teammateToReview),
+      }).catch(err => {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error(`[Orchestra] Staged workflow failed for ${team.id}:`, message)
+        appendMessage(team.id, {
+          id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
+          content: `❌ Staged workflow failed: ${message}`,
+          type: 'chat', timestamp: new Date().toISOString(),
+        })
+      })
+    } else {
+      // Normal mode: inject prompts simultaneously
+      console.log(`[Orchestra] All ${ready.length} agents ready — injecting prompts simultaneously`)
+      await Promise.all(
+        ready.map(async ({ agent, sessionName }) => {
+          const promptFile = collabPromptFile(team.id, agent.name)
+          try {
+            if (agent.hostId && !isSelf(agent.hostId)) {
+              const host = getHostById(agent.hostId)
+              if (host) {
+                const prompt = fs.readFileSync(promptFile, 'utf-8')
+                await postRemoteSessionCommand(host.url, sessionName, prompt)
+              }
+            } else {
+              const agentCfg = resolveAgentProgram(agent.program)
+              if (agentCfg.inputMethod === 'pasteFromFile') {
+                await runtime.pasteFromFile(sessionName, promptFile)
+              } else {
+                const prompt = fs.readFileSync(promptFile, 'utf-8')
+                await runtime.sendKeys(sessionName, prompt, { literal: true, enter: true })
+              }
+            }
+            console.log(`[Orchestra] ✓ Prompt injected into ${sessionName}`)
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            appendMessage(team.id, {
+              id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
+              content: `❌ Delivery to ${agent.name} failed: ${message}`,
+              type: 'chat', timestamp: new Date().toISOString(),
+            })
+            console.error(`[Orchestra] ✗ Failed to inject prompt into ${sessionName}:`, err)
+          }
+        })
+      )
+
+      appendMessage(team.id, {
+        id: uuidv4(), teamId: team.id, from: 'orchestra', to: 'team',
+        content: `🚀 All ${ready.length} agents received their task — collaboration started`,
+        type: 'chat', timestamp: new Date().toISOString(),
+      })
+    }
   }
 
   return { data: { team }, status: 201 }

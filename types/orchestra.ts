@@ -53,6 +53,17 @@ export interface CreateTeamRequest {
   workingDirectory?: string
   templateName?: string
   useWorktrees?: boolean
+  staged?: boolean
+  stagedConfig?: StagedWorkflowConfig
+}
+
+export type StagedPhase = 'plan' | 'exec' | 'verify'
+
+export interface StagedWorkflowConfig {
+  planTimeoutMs?: number   // Max time for PLAN phase before auto-advancing (default: 120000 = 2min)
+  execTimeoutMs?: number   // Max time for EXEC phase before auto-advancing (default: 300000 = 5min)
+  verifyTimeoutMs?: number // Max time for VERIFY phase before completing (default: 120000 = 2min)
+  pollIntervalMs?: number  // How often to check for phase completion (default: 5000 = 5s)
 }
 
 export interface CollabTemplateRole {

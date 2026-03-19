@@ -3,7 +3,7 @@ import os from 'os'
 import path from 'path'
 import { execFileSync } from 'child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { OrchestraMessage, OrchestraTeam } from '../types/orchestra'
+import type { OrchestraMessage, OrchestraTeam, StagedWorkflowConfig } from '../types/orchestra'
 
 const TEAM_SAY_BIN = path.resolve(process.cwd(), 'scripts/team-say.sh')
 const TMP_ORCHESTRA_DIR = '/tmp/orchestra'
@@ -779,5 +779,175 @@ describe('worktree isolation lifecycle', () => {
     expect(mocks.mergeWorktree).not.toHaveBeenCalled()
     expect(mocks.destroyWorktree).not.toHaveBeenCalled()
     expect(mocks.killRemoteAgent).toHaveBeenCalledWith('http://remote.test', 'agent-1')
+  })
+})
+
+describe('staged workflow integration', () => {
+  let tempRoot: string
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ensemble-staged-'))
+    vi.resetModules()
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    vi.resetModules()
+    vi.restoreAllMocks()
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  })
+
+  async function setupStagedService(team: OrchestraTeam) {
+    const runtime = {
+      capturePane: vi.fn(async () => '>'),
+      sendKeys: vi.fn(async () => {}),
+      pasteFromFile: vi.fn(async () => {}),
+    }
+    const runStagedWorkflow = vi.fn(async () => {})
+
+    vi.doMock('../lib/orchestra-registry', () => ({
+      createTeam: vi.fn(() => team),
+      getTeam: vi.fn(() => team),
+      updateTeam: vi.fn((_id: string, updates: Partial<OrchestraTeam>) => ({ ...team, ...updates })),
+      loadTeams: vi.fn(() => []),
+      appendMessage: vi.fn(),
+      getMessages: vi.fn(() => []),
+    }))
+    vi.doMock('../lib/agent-spawner', () => ({
+      spawnLocalAgent: vi.fn(async ({ name, program, workingDirectory, hostId }) => ({
+        id: `${name}-id`,
+        name,
+        program,
+        sessionName: name,
+        workingDirectory,
+        hostId,
+      })),
+      killLocalAgent: vi.fn(async () => {}),
+      spawnRemoteAgent: vi.fn(async () => ({ id: 'remote-agent-id' })),
+      killRemoteAgent: vi.fn(async () => {}),
+      postRemoteSessionCommand: vi.fn(async () => {}),
+      isRemoteSessionReady: vi.fn(async () => true),
+      getAgentTokenUsage: vi.fn(async () => 'unknown'),
+    }))
+    vi.doMock('../lib/hosts-config', () => ({
+      isSelf: vi.fn(() => true),
+      getHostById: vi.fn(() => ({ id: 'local', url: 'http://local.test' })),
+      getSelfHostId: vi.fn(() => 'local'),
+    }))
+    vi.doMock('../lib/agent-runtime', () => ({
+      getRuntime: vi.fn(() => runtime),
+    }))
+    vi.doMock('../lib/agent-config', () => ({
+      resolveAgentProgram: vi.fn(() => ({ readyMarker: '>', inputMethod: 'sendKeys' })),
+    }))
+    vi.doMock('../lib/collab-paths', () => ({
+      ensureCollabDirs: vi.fn(),
+      collabPromptFile: vi.fn((teamId: string, agentName: string) => path.join(tempRoot, `${teamId}-${agentName}.prompt.txt`)),
+      collabDeliveryFile: vi.fn((teamId: string, sessionName: string) => path.join(tempRoot, `${teamId}-${sessionName}.delivery.txt`)),
+      collabSummaryFile: vi.fn((teamId: string) => path.join(tempRoot, `${teamId}.summary.txt`)),
+      collabRuntimeDir: vi.fn((teamId: string) => path.join(tempRoot, teamId)),
+      collabFinishedMarker: vi.fn((teamId: string) => path.join(tempRoot, `${teamId}.finished`)),
+      collabBridgePosted: vi.fn((teamId: string) => path.join(tempRoot, `${teamId}.posted`)),
+      collabBridgeResult: vi.fn((teamId: string) => path.join(tempRoot, `${teamId}.result`)),
+    }))
+    vi.doMock('../lib/worktree-manager', () => ({
+      createWorktree: vi.fn(),
+      mergeWorktree: vi.fn(async () => ({ success: true })),
+      destroyWorktree: vi.fn(async () => {}),
+    }))
+    vi.doMock('../lib/staged-workflow', () => ({
+      runStagedWorkflow,
+    }))
+
+    const mod = await import('../services/orchestra-service')
+    return { mod, runtime, runStagedWorkflow }
+  }
+
+  it('uses staged workflow instead of normal prompt injection when staged=true', async () => {
+    const team = makeTeam({
+      id: 'team-staged',
+      name: 'team-staged',
+      status: 'forming',
+      agents: [
+        { agentId: '', name: 'codex-1', program: 'codex', role: 'lead', hostId: '', status: 'spawning' },
+        { agentId: '', name: 'claude-2', program: 'claude', role: 'member', hostId: '', status: 'spawning' },
+      ],
+    })
+    const { mod, runtime, runStagedWorkflow } = await setupStagedService(team)
+    const stagedConfig: StagedWorkflowConfig = { planTimeoutMs: 1500 }
+
+    await mod.createOrchestraTeam({
+      name: team.name,
+      description: team.description,
+      agents: [{ program: 'codex' }, { program: 'claude' }],
+      workingDirectory: '/repo',
+      staged: true,
+      stagedConfig,
+    })
+
+    expect(runStagedWorkflow).toHaveBeenCalledTimes(1)
+    expect(runStagedWorkflow).toHaveBeenCalledWith(
+      team,
+      stagedConfig,
+      expect.objectContaining({
+        buildPlanPrompt: expect.any(Function),
+        buildExecPrompt: expect.any(Function),
+        buildVerifyPrompt: expect.any(Function),
+      }),
+    )
+    expect(runtime.sendKeys).not.toHaveBeenCalled()
+  })
+
+  it('keeps normal prompt injection when staged=false', async () => {
+    const team = makeTeam({
+      id: 'team-non-staged',
+      name: 'team-non-staged',
+      status: 'forming',
+      agents: [
+        { agentId: '', name: 'codex-1', program: 'codex', role: 'lead', hostId: '', status: 'spawning' },
+        { agentId: '', name: 'claude-2', program: 'claude', role: 'member', hostId: '', status: 'spawning' },
+      ],
+    })
+    const { mod, runtime, runStagedWorkflow } = await setupStagedService(team)
+
+    await mod.createOrchestraTeam({
+      name: team.name,
+      description: team.description,
+      agents: [{ program: 'codex' }, { program: 'claude' }],
+      workingDirectory: '/repo',
+      staged: false,
+    })
+
+    expect(runStagedWorkflow).not.toHaveBeenCalled()
+    expect(runtime.sendKeys).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ─────────────────────────────────────────────────────
+// 8. CreateTeamRequest — staged field in types
+// ─────────────────────────────────────────────────────
+describe('CreateTeamRequest staged types', () => {
+  it('staged field is optional and defaults behavior', () => {
+    const request: import('../types/orchestra').CreateTeamRequest = {
+      name: 'test',
+      description: 'test',
+      agents: [{ program: 'codex' }],
+      staged: true,
+      stagedConfig: {
+        planTimeoutMs: 60_000,
+        execTimeoutMs: 180_000,
+      },
+    }
+    expect(request.staged).toBe(true)
+    expect(request.stagedConfig?.planTimeoutMs).toBe(60_000)
+  })
+
+  it('staged field defaults to undefined (opt-in)', () => {
+    const request: import('../types/orchestra').CreateTeamRequest = {
+      name: 'test',
+      description: 'test',
+      agents: [{ program: 'codex' }],
+    }
+    expect(request.staged).toBeUndefined()
   })
 })
