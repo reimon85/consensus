@@ -173,25 +173,32 @@ Notifications include: team name, duration, message count, and a brief summary.
 
 Ensemble integrates with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as a `/collab` slash command. This lets you type `/collab "review the auth module"` and Claude will spawn a Codex + Claude team, monitor their conversation, and present results — all without leaving your terminal.
 
-### Step 1: Install the skill
+### Quick setup (one command)
 
-Create the skill directory and file:
+From the ensemble directory, run:
+
+```bash
+./scripts/setup-claude-code.sh
+```
+
+This automatically:
+- Installs the `/collab` skill to `~/.claude/skills/collab/`
+- Adds script permissions to `~/.claude/settings.json`
+- Verifies all prerequisites (Node.js, tmux, Python, agent CLIs)
+- Confirms everything is ready
+
+### Manual setup
+
+If you prefer to set things up manually:
+
+**Step 1:** Copy the skill file:
 
 ```bash
 mkdir -p ~/.claude/skills/collab
-```
-
-Then create `~/.claude/skills/collab/SKILL.md` with the skill definition. You can copy it from the repo:
-
-```bash
 cp /path/to/ensemble/skill/SKILL.md ~/.claude/skills/collab/SKILL.md
 ```
 
-Or create it manually — see the [skill template](https://github.com/michelhelsdingen/ensemble/blob/main/skill/SKILL.md) in the repo.
-
-### Step 2: Add permissions
-
-Add to `~/.claude/settings.json` so Claude Code can run ensemble scripts without confirmation prompts:
+**Step 2:** Add permissions to `~/.claude/settings.json`:
 
 ```json
 {
@@ -207,7 +214,7 @@ Add to `~/.claude/settings.json` so Claude Code can run ensemble scripts without
 
 Replace `/path/to/ensemble` with the actual path where you cloned the repo.
 
-### Step 3: Use it
+### Use it
 
 In any Claude Code session:
 

@@ -35,7 +35,13 @@ Ensemble ships with a `/collab` skill for [Claude Code](https://docs.anthropic.c
 /collab "Review the auth module for security issues"
 ```
 
-Claude spawns a team, shows the agent conversation live, and presents results when they're done. See [Configuration → Claude Code integration](configuration#claude-code-integration) for setup.
+Claude spawns a team, shows the agent conversation live, and presents results when they're done. Setup in one command:
+
+```bash
+./scripts/setup-claude-code.sh
+```
+
+See [Configuration → Claude Code integration](configuration#claude-code-integration) for details.
 
 ## Quick links
 

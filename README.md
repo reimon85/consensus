@@ -82,7 +82,13 @@ Ensemble ships with a skill for [Claude Code](https://docs.anthropic.com/en/docs
 /collab "Review the auth module for security issues"
 ```
 
-Claude spawns a Codex + Claude team, shows their conversation live in your terminal, and presents a summary when done. Setup takes 2 minutes — see the [Claude Code integration guide](https://michelhelsdingen.github.io/ensemble/configuration#claude-code-integration).
+Claude spawns a Codex + Claude team, shows their conversation live in your terminal, and presents a summary when done. One-command setup:
+
+```bash
+./scripts/setup-claude-code.sh
+```
+
+This installs the skill, configures permissions, and verifies prerequisites. See the [full setup guide](https://michelhelsdingen.github.io/ensemble/configuration#claude-code-integration) for details.
 
 ## How It Works
 
