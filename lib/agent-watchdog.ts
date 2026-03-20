@@ -156,7 +156,7 @@ export class AgentWatchdog {
     }
   }
 
-  private async nudgeAgent(team: EnsembleTeam, agentName: string, program: string, hostId?: string): Promise<void> {
+  private async nudgeAgent(team: EnsembleTeam, agentName: string, _program: string, hostId?: string): Promise<void> {
     const timestamp = new Date(this.now()).toISOString()
     this.deps.appendMessage(team.id, {
       id: uuidv4(),
@@ -177,17 +177,12 @@ export class AgentWatchdog {
       return
     }
 
+    // Always use pasteFromFile to avoid shell escaping issues with sendKeys
     const runtime = this.deps.getRuntime()
-    const agentCfg = this.deps.resolveAgentProgram(program)
-    if (agentCfg.inputMethod === 'pasteFromFile') {
-      const filePath = this.deps.collabDeliveryFile(team.id, sessionName)
-      fs.mkdirSync(path.dirname(filePath), { recursive: true })
-      fs.writeFileSync(filePath, WATCHDOG_NUDGE_TEXT)
-      await runtime.pasteFromFile(sessionName, filePath)
-      return
-    }
-
-    await runtime.sendKeys(sessionName, WATCHDOG_NUDGE_TEXT, { literal: true, enter: true })
+    const filePath = this.deps.collabDeliveryFile(team.id, sessionName)
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    fs.writeFileSync(filePath, WATCHDOG_NUDGE_TEXT)
+    await runtime.pasteFromFile(sessionName, filePath)
   }
 }
 

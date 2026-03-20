@@ -618,15 +618,12 @@ export async function sendTeamMessage(
         const host = getHostById(targetAgent.hostId)
         if (host) await postRemoteSessionCommand(host.url, sessionName, deliveryText)
       } else {
-        const agentCfg = resolveAgentProgram(targetAgent.program)
-        if (agentCfg.inputMethod === 'pasteFromFile') {
-          const tmpFile = collabDeliveryFile(teamId, sessionName)
-          fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
-          fs.writeFileSync(tmpFile, deliveryText)
-          await runtime.pasteFromFile(sessionName, tmpFile)
-        } else {
-          await runtime.sendKeys(sessionName, deliveryText, { literal: true, enter: true })
-        }
+        // Always use pasteFromFile for message delivery to avoid shell escaping issues
+        // (sendKeys breaks on ?, !, \ and other special chars in zsh)
+        const tmpFile = collabDeliveryFile(teamId, sessionName)
+        fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
+        fs.writeFileSync(tmpFile, deliveryText)
+        await runtime.pasteFromFile(sessionName, tmpFile)
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)

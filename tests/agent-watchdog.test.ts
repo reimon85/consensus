@@ -103,7 +103,7 @@ describe('AgentWatchdog', () => {
     nowMs += 91_000
     await watchdog.poll()
 
-    expect(sendKeys).toHaveBeenCalledWith('alpha-codex-1', WATCHDOG_NUDGE_TEXT, { literal: true, enter: true })
+    expect(pasteFromFile).toHaveBeenCalledWith('alpha-codex-1', `/tmp/team-1/alpha-codex-1.txt`)
     expect(appended).toHaveLength(1)
     expect(appended[0].content).toContain('Watchdog nudged codex-1')
     watchdog.stop()
