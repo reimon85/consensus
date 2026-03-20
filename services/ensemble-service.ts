@@ -178,7 +178,7 @@ function formatDuration(durationMs: number): string {
 
 /** Escape special chars for Telegram MarkdownV2 */
 function escMd(s: string): string {
-  return s.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1')
+  return s.replace(/([_[\]()~`>#+\-=|{}.!*\\])/g, '\\$1')
 }
 
 function sendTelegramSummary(params: {

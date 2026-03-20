@@ -43,7 +43,7 @@ function acquireTeamsLock(): () => void {
   ensureDir(ENSEMBLE_DIR)
   const startedAt = Date.now()
 
-  while (true) {
+  for (;;) {
     try {
       fs.mkdirSync(TEAMS_LOCK_DIR)
       return () => {

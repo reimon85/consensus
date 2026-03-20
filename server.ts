@@ -201,6 +201,16 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[Ensemble] Port ${PORT} is already in use on ${HOST}. Stop the other process or set ENSEMBLE_PORT to a different port.`)
+    process.exit(1)
+  }
+
+  console.error('[Ensemble] Server failed to start:', err)
+  process.exit(1)
+})
+
 server.listen(PORT, HOST, () => {
   console.log(`[Ensemble] Server running on http://${HOST}:${PORT}`)
   console.log(`[Ensemble] Health: http://localhost:${PORT}/api/v1/health`)

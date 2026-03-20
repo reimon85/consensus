@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EnsembleMessage, EnsembleTeam } from '../types/ensemble'
 import {
   AgentWatchdog,
-  WATCHDOG_NUDGE_TEXT,
   getWatchdogNudgeMs,
   getWatchdogStallMs,
 } from '../lib/agent-watchdog'
