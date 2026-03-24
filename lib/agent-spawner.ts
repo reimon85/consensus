@@ -53,7 +53,16 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
 
   // Start the AI program
   const startCommand = resolveStartCommand(options.program)
-  await runtime.sendKeys(sessionName, `unset CLAUDECODE; ${startCommand}`, { literal: true, enter: true })
+
+  // Forward ENSEMBLE_* and agent-specific env vars to tmux session
+  const envForward = Object.entries(process.env)
+    .filter(([k]) => k.startsWith('ENSEMBLE_') || k.startsWith('NVIDIA_') || k.startsWith('OPENAI_') || k.startsWith('ANTHROPIC_'))
+    .filter(([, v]) => v)
+    .map(([k, v]) => `export ${k}="${v}"`)
+    .join('; ')
+  const envPrefix = envForward ? `${envForward}; ` : ''
+
+  await runtime.sendKeys(sessionName, `unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
 
   console.log(`[Spawner] Agent ${options.name} started in tmux session ${sessionName}`)
 
