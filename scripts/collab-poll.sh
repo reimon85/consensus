@@ -81,6 +81,8 @@ if [ -f "$FINISHED" ] || [ -f "$SUMMARY" ]; then
   fi
   echo "---STATUS:DONE"
   [ -f "$SUMMARY" ] && cat "$SUMMARY"
+  REPLAY="$(collab_runtime_dir "$TEAM_ID")/replay.html"
+  [ -f "$REPLAY" ] && echo "---REPLAY:$REPLAY"
   exit 0
 fi
 

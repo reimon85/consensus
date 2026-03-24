@@ -51,7 +51,15 @@ echo "[bridge] Watching $FILE"
 
 while true; do
   if [ -f "$FINISHED_FILE" ]; then
-    echo "[bridge] finished marker detected, stopping"
+    echo "[bridge] finished marker detected"
+    # Auto-generate replay HTML
+    if [ "${ENSEMBLE_REPLAY:-true}" = "true" ]; then
+      REPLAY_FILE="$RUNTIME_DIR/replay.html"
+      if python3 "$SCRIPT_DIR/generate-replay.py" "$TEAM_ID" --output "$REPLAY_FILE" 2>/dev/null; then
+        echo "[bridge] replay saved: $REPLAY_FILE"
+      fi
+    fi
+    echo "[bridge] stopping"
     exit 0
   fi
 
