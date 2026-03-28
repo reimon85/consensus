@@ -4,7 +4,6 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest } from '../types/ensemble'
 import { getEnsembleRegistryDir } from './ensemble-paths'
-import { collabMessagesFile } from './collab-paths'
 
 const ENSEMBLE_DIR = getEnsembleRegistryDir()
 const TEAMS_FILE = path.join(ENSEMBLE_DIR, 'teams.json')
@@ -140,24 +139,21 @@ export function appendMessage(teamId: string, message: EnsembleMessage): void {
 }
 
 export function getMessages(teamId: string, since?: string): EnsembleMessage[] {
-  const sources = [
-    path.join(MESSAGES_DIR, teamId, 'feed.jsonl'),
-    collabMessagesFile(teamId),
-  ]
+  // Single store: only read from feed.jsonl (canonical source)
+  // The old collabMessagesFile (tmp/ensemble/<id>/messages.jsonl) is deprecated
+  const feedFile = path.join(MESSAGES_DIR, teamId, 'feed.jsonl')
 
-  const seenIds = new Set<string>()
+  if (!fs.existsSync(feedFile)) return []
+
+  const lines = fs.readFileSync(feedFile, 'utf-8').trim().split('\n').filter(Boolean)
   let messages: EnsembleMessage[] = []
 
-  for (const file of sources) {
-    if (!fs.existsSync(file)) continue
-    const lines = fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean)
-    for (const line of lines) {
+  for (const line of lines) {
+    try {
       const msg = JSON.parse(line) as EnsembleMessage
-      const dedupeKey = msg.id || `${msg.from}:${msg.timestamp}:${msg.content?.slice(0, 50)}`
-      if (!seenIds.has(dedupeKey)) {
-        seenIds.add(dedupeKey)
-        messages.push(msg)
-      }
+      messages.push(msg)
+    } catch {
+      // Skip malformed lines
     }
   }
 

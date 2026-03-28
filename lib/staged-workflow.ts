@@ -3,6 +3,7 @@ import type {
   EnsembleTeam,
   EnsembleTeamAgent,
   StagedWorkflowConfig,
+  EnsembleMessage,
 } from '../types/ensemble'
 import { appendMessage, getMessages } from './ensemble-registry'
 import { getRuntime } from './agent-runtime'
@@ -18,6 +19,7 @@ const DEFAULT_EXEC_TIMEOUT_MS = 300_000
 const DEFAULT_VERIFY_TIMEOUT_MS = 120_000
 const DEFAULT_POLL_INTERVAL_MS = 5_000
 
+// Legacy regex patterns for backward compatibility with agents that don't use message types
 const PLAN_SHARED_PATTERNS = [
   /\bplan\b/i,
   /\bstrateg/i,
@@ -38,6 +40,20 @@ const EXEC_DONE_PATTERNS = [
   /\bimplemented\b/i,
   /\bgeïmplementeerd\b/i,
 ]
+
+/**
+ * Check if a message indicates plan completion via official message type or legacy regex
+ */
+function isPlanShared(msg: EnsembleMessage): boolean {
+  return msg.type === 'phase_ack' || PLAN_SHARED_PATTERNS.some(p => p.test(msg.content))
+}
+
+/**
+ * Check if a message indicates execution completion via official message type or legacy regex
+ */
+function isExecDone(msg: EnsembleMessage): boolean {
+  return msg.type === 'completion_signal' || EXEC_DONE_PATTERNS.some(p => p.test(msg.content))
+}
 
 type ActiveAgent = Pick<EnsembleTeamAgent, 'name' | 'program' | 'hostId' | 'status'>
 
@@ -63,6 +79,7 @@ function resolveConfig(config?: StagedWorkflowConfig): Required<StagedWorkflowCo
     execTimeoutMs: config?.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS,
     verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
     pollIntervalMs: config?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    minSessionDurationMs: config?.minSessionDurationMs ?? 0,
   }
 }
 
@@ -112,7 +129,7 @@ export class StagedWorkflowManager {
       return
     }
 
-    this.log('plan', 'Starting PLAN phase — agents may only plan and coordinate')
+    this.log('plan', 'Starting PLAN phase — agents may only plan and coordinate', 'phase_ack')
     const planStartedAt = new Date().toISOString()
     await Promise.all(this.agents.map((agent, index) => this.deliverPlanPrompt(agent, index)))
 
@@ -230,7 +247,7 @@ export class StagedWorkflowManager {
     this.messageCache.push(...newMessages)
     return this.agentNames().every(name =>
       this.messageCache.some(message =>
-        message.from === name && PLAN_SHARED_PATTERNS.some(pattern => pattern.test(message.content))
+        message.from === name && isPlanShared(message)
       ),
     )
   }
@@ -240,7 +257,7 @@ export class StagedWorkflowManager {
     this.messageCache.push(...newMessages)
     return this.agentNames().every(name =>
       this.messageCache.some(message =>
-        message.from === name && EXEC_DONE_PATTERNS.some(pattern => pattern.test(message.content))
+        message.from === name && isExecDone(message)
       ),
     )
   }
@@ -257,14 +274,14 @@ export class StagedWorkflowManager {
     return 'timeout'
   }
 
-  private log(phase: 'plan' | 'exec' | 'verify', content: string): void {
+  private log(phase: 'plan' | 'exec' | 'verify', content: string, type: EnsembleMessage['type'] = 'chat'): void {
     appendMessage(this.options.team.id, {
       id: uuidv4(),
       teamId: this.options.team.id,
       from: 'ensemble',
       to: 'team',
       content: `[Staged/${phase.toUpperCase()}] ${content}`,
-      type: 'chat',
+      type,
       timestamp: new Date().toISOString(),
     })
   }

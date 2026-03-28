@@ -6,6 +6,7 @@
 
 import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest, CollabTemplatesFile } from '../types/ensemble'
+import { validateCreateTeamRequest } from '../types/ensemble'
 import {
   createTeam, getTeam, updateTeam, loadTeams,
   appendMessage, getMessages,
@@ -40,9 +41,23 @@ interface ServiceResult<T> {
   status: number
 }
 
+// Basic instrumentation metrics
+const metrics = {
+  teamsCreated: 0,
+  teamsDisbanded: 0,
+  activeTeams: 0,
+  messagesProcessed: 0,
+  errors: 0,
+}
+
+export function getMetrics() {
+  return { ...metrics }
+}
+
 const IDLE_CHECK_INTERVAL_MS = 15_000
 const COMPLETION_SIGNAL_WINDOW_MS = 60_000
 const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = 120_000
+const DEFAULT_MIN_SESSION_DURATION_MS = 300_000 // 5 minutes
 const COMPLETION_PATTERNS = [
   /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
   /(?:^|[^\p{L}\p{N}_])done(?:[^\p{L}\p{N}_]|$)/iu,
@@ -50,6 +65,13 @@ const COMPLETION_PATTERNS = [
   /(?:^|[^\p{L}\p{N}_])klaar(?:[^\p{L}\p{N}_]|$)/iu,
   /(?:^|\s)tot de volgende(?:\s|$)/i,
 ]
+
+function parseMinSessionDuration(): number {
+  const env = process.env.ENSEMBLE_MIN_SESSION_DURATION_MS
+  if (!env) return DEFAULT_MIN_SESSION_DURATION_MS
+  const parsed = Number(env)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MIN_SESSION_DURATION_MS
+}
 
 interface CompletionSignal {
   agentName: string
@@ -65,6 +87,9 @@ class EnsembleService {
   private readonly watchdog: AgentWatchdog
 
   constructor() {
+    // Recovery: cleanup orphaned teams on startup
+    this.recoverOrphanedTeams()
+
     this.idleCheckTimer = setInterval(() => {
       void this.checkIdleTeams()
     }, IDLE_CHECK_INTERVAL_MS)
@@ -91,7 +116,8 @@ class EnsembleService {
 
     for (const team of teams) {
       if (this.disbandingTeams.has(team.id)) continue
-      if (!this.shouldAutoDisband(team)) continue
+      const reason = this.shouldAutoDisband(team)
+      if (!reason) continue
 
       this.disbandingTeams.add(team.id)
 
@@ -101,7 +127,7 @@ class EnsembleService {
           teamId: team.id,
           from: 'ensemble',
           to: 'team',
-          content: 'Auto-disband triggered after 60s idle and completion-like agent messages',
+          content: `Auto-disband triggered: ${reason}`,
           type: 'chat',
           timestamp: new Date().toISOString(),
         })
@@ -116,7 +142,11 @@ class EnsembleService {
     }
   }
 
-  private shouldAutoDisband(team: EnsembleTeam): boolean {
+  /**
+   * Returns a reason string if the team should auto-disband, or false otherwise.
+   * The reason string is used for observability/logging.
+   */
+  private shouldAutoDisband(team: EnsembleTeam): string | false {
     const messages = getMessages(team.id)
     const nonEnsembleMessages = messages.filter(message => message.from !== 'ensemble')
     const lastMessage = nonEnsembleMessages[nonEnsembleMessages.length - 1]
@@ -131,6 +161,13 @@ class EnsembleService {
     const activeAgents = team.agents.filter(agent => agent.status === 'active')
     if (activeAgents.length === 0) return false
 
+    // Enforce minimum session duration before auto-disband can trigger
+    const sessionDurationMs = Date.now() - new Date(team.createdAt).getTime()
+    const minSessionMs = parseMinSessionDuration()
+    if (sessionDurationMs < minSessionMs) {
+      return `session too young (${sessionDurationMs}ms < ${minSessionMs}ms min)`
+    }
+
     const idleForMs = Date.now() - lastTimestamp
     const activeAgentNames = new Set(activeAgents.map(agent => agent.name))
     const completionSignals = messages
@@ -142,9 +179,13 @@ class EnsembleService {
       .filter((signal): signal is CompletionSignal => !Number.isNaN(signal.timestamp))
       .sort((a, b) => a.timestamp - b.timestamp)
 
-    if (this.hasTwoRecentCompletionSignals(completionSignals)) return true
+    if (this.hasTwoRecentCompletionSignals(completionSignals)) {
+      return `two completion signals within ${COMPLETION_SIGNAL_WINDOW_MS}ms (idle ${idleForMs}ms)`
+    }
     if (idleForMs <= SINGLE_SIGNAL_IDLE_THRESHOLD_MS) return false
     return completionSignals.length >= 1
+      ? `one completion signal + idle >${SINGLE_SIGNAL_IDLE_THRESHOLD_MS}ms (${idleForMs}ms)`
+      : false
   }
 
   private hasCompletionSignal(content: string): boolean {
@@ -164,6 +205,46 @@ class EnsembleService {
   private stop(): void {
     clearInterval(this.idleCheckTimer)
     this.watchdog.stop()
+    // Graceful shutdown: mark all active teams as disbanded so no zombie teams remain
+    const activeTeams = loadTeams().filter(team => team.status === 'active')
+    for (const team of activeTeams) {
+      updateTeam(team.id, { status: 'disbanded', completedAt: new Date().toISOString() })
+    }
+    if (activeTeams.length > 0) {
+      console.log(`[Ensemble] Graceful shutdown: marked ${activeTeams.length} active team(s) as disbanded`)
+    }
+  }
+
+  /**
+   * Recovery: Clean up orphaned teams on startup.
+   * A team is orphaned if it's marked 'active' but its tmux sessions are gone.
+   */
+  private recoverOrphanedTeams(): void {
+    const activeTeams = loadTeams().filter(team => team.status === 'active')
+    const runtime = getRuntime()
+    let recovered = 0
+
+    for (const team of activeTeams) {
+      const allSessionsDead = team.agents.every(agent => {
+        const sessionName = `${team.name}-${agent.name}`
+        try {
+          return !runtime.sessionExists(sessionName)
+        } catch {
+          return true // if we can't check, assume dead
+        }
+      })
+
+      if (allSessionsDead && team.agents.length > 0) {
+        updateTeam(team.id, { status: 'disbanded', completedAt: new Date().toISOString() })
+        console.log(`[Ensemble] Recovery: marked orphaned team ${team.id} as disbanded`)
+        recovered++
+      }
+    }
+
+    if (recovered > 0) {
+      metrics.activeTeams -= recovered
+      console.log(`[Ensemble] Recovery: cleaned up ${recovered} orphaned team(s)`)
+    }
   }
 }
 
@@ -306,6 +387,16 @@ export function buildPromptPreview(params: {
 export async function createEnsembleTeam(
   request: CreateTeamRequest
 ): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  // Schema validation
+  const validation = validateCreateTeamRequest(request)
+  if (!validation.valid) {
+    return { error: `Validation failed: ${validation.errors.join('; ')}`, status: 400 }
+  }
+
+  // Metrics
+  metrics.teamsCreated++
+  metrics.activeTeams++
+
   const team = createTeam(request)
   const cwd = request.workingDirectory || process.cwd()
   const worktreeMap = new Map<string, WorktreeInfo>()
@@ -694,6 +785,10 @@ export async function writeDisbandSummary(teamId: string): Promise<void> {
 export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team: EnsembleTeam }>> {
   const team = getTeam(teamId)
   if (!team) return { error: 'Team not found', status: 404 }
+
+  // Update metrics
+  metrics.teamsDisbanded++
+  metrics.activeTeams = Math.max(0, metrics.activeTeams - 1)
 
   // Write summary before killing sessions so the Claude Code session can present it
   await writeDisbandSummary(teamId)
