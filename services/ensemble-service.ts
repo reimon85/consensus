@@ -56,7 +56,6 @@ export function getMetrics() {
 
 const IDLE_CHECK_INTERVAL_MS = 15_000
 const COMPLETION_SIGNAL_WINDOW_MS = 60_000
-const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = 120_000
 const DEFAULT_MIN_SESSION_DURATION_MS = 300_000 // 5 minutes
 const COMPLETION_PATTERNS = [
   /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
@@ -182,10 +181,11 @@ class EnsembleService {
     if (this.hasTwoRecentCompletionSignals(completionSignals)) {
       return `two completion signals within ${COMPLETION_SIGNAL_WINDOW_MS}ms (idle ${idleForMs}ms)`
     }
-    if (idleForMs <= SINGLE_SIGNAL_IDLE_THRESHOLD_MS) return false
-    return completionSignals.length >= 1
-      ? `one completion signal + idle >${SINGLE_SIGNAL_IDLE_THRESHOLD_MS}ms (${idleForMs}ms)`
-      : false
+    // Require idle > 5 minutes AND at least 2 completion signals to disband.
+    // This prevents premature disband when agents say "done" while still working.
+    if (idleForMs <= 300_000) return false // 5 minutes idle minimum
+    if (completionSignals.length < 2) return false
+    return `multiple completion signals + idle >5min (${idleForMs}ms)`
   }
 
   private hasCompletionSignal(content: string): boolean {
