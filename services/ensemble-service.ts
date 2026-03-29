@@ -164,7 +164,7 @@ class EnsembleService {
     const sessionDurationMs = Date.now() - new Date(team.createdAt).getTime()
     const minSessionMs = parseMinSessionDuration()
     if (sessionDurationMs < minSessionMs) {
-      return `session too young (${sessionDurationMs}ms < ${minSessionMs}ms min)`
+      return false // Don't disband — session too young
     }
 
     const idleForMs = Date.now() - lastTimestamp
