@@ -81,9 +81,9 @@ describe('AgentWatchdog', () => {
   function createWatchdog() {
     return new AgentWatchdog({
       loadTeams: () => teams,
-      getMessages: () => messages,
-      appendMessage: (_teamId, message) => appended.push(message),
-      getRuntime: () => ({ sendKeys, pasteFromFile }),
+      getMessages: async () => messages,
+      appendMessage: async (_teamId, message) => { appended.push(message) },
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: async () => '' }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,

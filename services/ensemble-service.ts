@@ -96,8 +96,8 @@ class EnsembleService {
     this.idleCheckTimer.unref()
     this.watchdog = new AgentWatchdog({
       loadTeams,
-      getMessages: (teamId: string) => getMessages(teamId),
-      appendMessage,
+      getMessages: async (teamId: string) => getMessages(teamId),
+      appendMessage: async (teamId: string, message: EnsembleMessage) => appendMessage(teamId, message),
       getRuntime,
       resolveAgentProgram,
       isSelf: (hostId?: string) => isSelf(hostId || ''),
@@ -116,13 +116,13 @@ class EnsembleService {
 
     for (const team of teams) {
       if (this.disbandingTeams.has(team.id)) continue
-      const reason = this.shouldAutoDisband(team)
+      const reason = await this.shouldAutoDisband(team)
       if (!reason) continue
 
       this.disbandingTeams.add(team.id)
 
       try {
-        appendMessage(team.id, {
+        await appendMessage(team.id, {
           id: uuidv4(),
           teamId: team.id,
           from: 'ensemble',
@@ -146,8 +146,8 @@ class EnsembleService {
    * Returns a reason string if the team should auto-disband, or false otherwise.
    * The reason string is used for observability/logging.
    */
-  private shouldAutoDisband(team: EnsembleTeam): string | false {
-    const messages = getMessages(team.id)
+  private async shouldAutoDisband(team: EnsembleTeam): Promise<string | false> {
+    const messages = await getMessages(team.id)
     const nonEnsembleMessages = messages.filter(message => message.from !== 'ensemble')
     const lastMessage = nonEnsembleMessages[nonEnsembleMessages.length - 1]
     if (!lastMessage) return false
@@ -416,7 +416,7 @@ export async function createEnsembleTeam(
           worktreeMap.set(agentSpec.name, worktreeInfo)
           team.agents[i].worktreePath = worktreeInfo.path
           team.agents[i].worktreeBranch = worktreeInfo.branch
-          appendMessage(team.id, {
+          await appendMessage(team.id, {
             id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
             content: `🌳 Worktree created for ${agentSpec.name}: ${worktreeInfo.branch}`,
             type: 'chat', timestamp: new Date().toISOString(),
@@ -424,7 +424,7 @@ export async function createEnsembleTeam(
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
           console.error(`[Ensemble] Failed to create worktree for ${agentSpec.name}:`, message)
-          appendMessage(team.id, {
+          await appendMessage(team.id, {
             id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
             content: `⚠️ Worktree creation failed for ${agentSpec.name}: ${message}. Using shared directory.`,
             type: 'chat', timestamp: new Date().toISOString(),
@@ -482,7 +482,7 @@ export async function createEnsembleTeam(
       team.agents[i].hostId = hostId
       team.agents[i].status = 'active'
 
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `${agentSpec.name} (${agentSpec.program} @ ${hostId}) has joined #${team.name}`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -491,7 +491,7 @@ export async function createEnsembleTeam(
       const message = err instanceof Error ? err.message : String(err)
       console.error(`[Ensemble] Failed to spawn ${agentName}:`, message)
       team.agents[i].status = 'idle'
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `Failed to spawn ${agentName}: ${message}`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -546,7 +546,7 @@ export async function createEnsembleTeam(
     const notReady = readyResults.filter(r => !r.ready)
 
     for (const nr of notReady) {
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `❌ ${nr.agent.name} failed to start — timed out`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -554,7 +554,7 @@ export async function createEnsembleTeam(
     }
 
     if (ready.length < 2) {
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `❌ Team start aborted: only ${ready.length}/${activeAgents.length} agents ready`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -567,7 +567,7 @@ export async function createEnsembleTeam(
     // Phase 3: Inject prompts (skip if staged — staged workflow handles its own prompts)
     if (request.staged) {
       // Staged mode: skip normal prompt injection, run plan→exec→verify workflow
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `🚀 All ${ready.length} agents ready — starting staged workflow (plan → exec → verify)`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -600,10 +600,10 @@ export async function createEnsembleTeam(
         buildPlanPrompt: ({ agent, teammates, index }) => buildStagedPlanPrompt(agent.name, teammates, index),
         buildExecPrompt: ({ teammates }) => buildStagedExecPrompt(teammates),
         buildVerifyPrompt: ({ teammateToReview }) => buildStagedVerifyPrompt(teammateToReview),
-      }).catch(err => {
+      }).catch(async err => {
         const message = err instanceof Error ? err.message : String(err)
         console.error(`[Ensemble] Staged workflow failed for ${team.id}:`, message)
-        appendMessage(team.id, {
+        await appendMessage(team.id, {
           id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
           content: `❌ Staged workflow failed: ${message}`,
           type: 'chat', timestamp: new Date().toISOString(),
@@ -634,7 +634,7 @@ export async function createEnsembleTeam(
             console.log(`[Ensemble] ✓ Prompt injected into ${sessionName}`)
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
-            appendMessage(team.id, {
+            await appendMessage(team.id, {
               id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
               content: `❌ Delivery to ${agent.name} failed: ${message}`,
               type: 'chat', timestamp: new Date().toISOString(),
@@ -644,7 +644,7 @@ export async function createEnsembleTeam(
         })
       )
 
-      appendMessage(team.id, {
+      await appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `🚀 All ${ready.length} agents received their task — collaboration started`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -655,10 +655,10 @@ export async function createEnsembleTeam(
   return { data: { team }, status: 201 }
 }
 
-export function getEnsembleTeam(teamId: string): ServiceResult<{ team: EnsembleTeam; messages: EnsembleMessage[] }> {
+export async function getEnsembleTeam(teamId: string): Promise<ServiceResult<{ team: EnsembleTeam; messages: EnsembleMessage[] }>> {
   const team = getTeam(teamId)
   if (!team) return { error: 'Team not found', status: 404 }
-  return { data: { team, messages: getMessages(teamId) }, status: 200 }
+  return { data: { team, messages: await getMessages(teamId) }, status: 200 }
 }
 
 export function listEnsembleTeams(): ServiceResult<{ teams: EnsembleTeam[] }> {
@@ -669,10 +669,10 @@ export async function checkIdleTeams(): Promise<void> {
   await ensembleService.checkIdleTeams()
 }
 
-export function getTeamFeed(teamId: string, since?: string): ServiceResult<{ messages: EnsembleMessage[] }> {
+export async function getTeamFeed(teamId: string, since?: string): Promise<ServiceResult<{ messages: EnsembleMessage[] }>> {
   const team = getTeam(teamId)
   if (!team) return { error: 'Team not found', status: 404 }
-  return { data: { messages: getMessages(teamId, since) }, status: 200 }
+  return { data: { messages: await getMessages(teamId, since) }, status: 200 }
 }
 
 export async function sendTeamMessage(
@@ -686,7 +686,7 @@ export async function sendTeamMessage(
     id: existingId || uuidv4(), teamId, from: from || 'user', to, content,
     type: 'chat', timestamp: existingTimestamp || new Date().toISOString(),
   }
-  appendMessage(teamId, message)
+  await appendMessage(teamId, message)
 
   // Determine which agents should receive this message in their tmux pane
   const sender = from || 'user'
@@ -723,7 +723,7 @@ export async function sendTeamMessage(
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
-      appendMessage(teamId, {
+      await appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content: `❌ Delivery to ${targetAgent.name} failed: ${reason}`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -743,7 +743,7 @@ export async function writeDisbandSummary(teamId: string): Promise<void> {
   const team = getTeam(teamId)
   if (!team) return
 
-  const messages = getMessages(teamId)
+  const messages = await getMessages(teamId)
   const agentMsgs = messages.filter(m => m.from !== 'ensemble' && m.from !== 'user')
   if (agentMsgs.length === 0) return
 
@@ -806,7 +806,7 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
 
   for (const agent of team.agents) {
     if (agent.status === 'active') {
-      appendMessage(teamId, {
+      await appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content: `${agent.name} has left #${team.name}`,
         type: 'chat', timestamp: new Date().toISOString(),
@@ -841,7 +841,7 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
       }
       const result = await mergeWorktree(worktreeInfo, basePath)
 
-      appendMessage(teamId, {
+      await appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content: result.success
           ? `🌳 Merged ${agent.name}'s worktree (${agent.worktreeBranch})`
@@ -877,7 +877,7 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
 
   // Optional: save session summary to claude-mem
   try {
-    const messages = getMessages(teamId)
+    const messages = await getMessages(teamId)
     const agentMessages = messages.filter(m => m.from !== 'ensemble' && m.from !== 'user')
     if (agentMessages.length > 0) {
       const durationMs = updated!.completedAt && team.createdAt

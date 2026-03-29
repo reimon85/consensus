@@ -91,7 +91,7 @@ describe('getMessages() — dual store merge', () => {
     writeJsonl(path.join(feedDir, 'feed.jsonl'), [msg])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe('feed-only')
@@ -104,7 +104,7 @@ describe('getMessages() — dual store merge', () => {
     writeJsonl(tmpFile, [msg])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe('tmp-only')
@@ -120,7 +120,7 @@ describe('getMessages() — dual store merge', () => {
     ])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     expect(result).toHaveLength(2)
     expect(result.map(m => m.id)).toEqual(['feed-msg', 'tmp-msg'])
@@ -137,7 +137,7 @@ describe('getMessages() — dual store merge', () => {
     ])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     const matching = result.filter(m => m.id === sharedId)
     expect(matching).toHaveLength(1)
@@ -153,7 +153,7 @@ describe('getMessages() — dual store merge', () => {
     ])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     expect(result.map(m => m.id)).toEqual(['early', 'late', 'no-ts'])
   })
@@ -166,7 +166,7 @@ describe('getMessages() — dual store merge', () => {
     ])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId, '2026-01-01T11:00:00.000Z')
+    const result = await getMessages(teamId, '2026-01-01T11:00:00.000Z')
 
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe('new')
@@ -174,7 +174,7 @@ describe('getMessages() — dual store merge', () => {
 
   it('returns empty array when no files exist', async () => {
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages('nonexistent-team-xyz')
+    const result = await getMessages('nonexistent-team-xyz')
     expect(result).toEqual([])
   })
 
@@ -187,7 +187,7 @@ describe('getMessages() — dual store merge', () => {
     writeJsonl(path.join(TMP_ENSEMBLE_DIR, teamId, 'messages.jsonl'), [msg])
 
     const { getMessages } = await import('../lib/ensemble-registry')
-    const result = getMessages(teamId)
+    const result = await getMessages(teamId)
 
     // Should be deduplicated to 1 message
     const matching = result.filter(m => m.content === 'same content here')

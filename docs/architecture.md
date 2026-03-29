@@ -48,16 +48,19 @@ ensemble/
 │   ├── agent-config.ts        # agents.json loader + program resolver
 │   ├── agent-runtime.ts       # AgentRuntime interface + TmuxRuntime
 │   ├── agent-spawner.ts       # Local/remote agent spawn lifecycle
-│   ├── agent-watchdog.ts      # Idle detection + nudge mechanism
+│   ├── agent-watchdog.ts      # Idle detection + nudge + blocking prompt detection
+│   ├── blocking-prompt-detector.ts # Pattern matching for Y/N prompts
 │   ├── collab-paths.ts        # /tmp/ensemble/* path resolver
 │   ├── ensemble-paths.ts      # Data directory paths
+│   ├── ensemble-registry.ts  # JSONL persistence (async, emits to messageBus)
 │   ├── hosts-config.ts        # Multi-host discovery + lookup
-│   ├── ensemble-registry.ts  # JSONL persistence (with file locking)
-│   ├── staged-workflow.ts     # Multi-phase workflows
+│   ├── message-bus.ts         # EventEmitter singleton for real-time events
+│   ├── staged-workflow.ts     # Multi-phase workflows (event-driven)
 │   └── worktree-manager.ts    # Git worktree isolation
 ├── types/
 │   ├── agent-program.ts       # AgentProgram interface
-│   └── ensemble.ts            # Team, Message, Agent types
+│   ├── ensemble.ts            # Team, Message, Agent types
+│   └── messages.ts            # Event and topic types for pub/sub
 ├── scripts/
 │   ├── collab-launch.sh       # All-in-one team launcher
 │   ├── collab-poll.sh         # Single-shot message poller
@@ -152,7 +155,7 @@ All runtime data lives in `/tmp/ensemble/<team-id>/`:
 
 | File | Purpose |
 |---|---|
-| `messages.jsonl` | Full message log |
+| `messages.jsonl` | Full message log (deprecated) |
 | `summary.txt` | Written on disband |
 | `.finished` | Cleanup signal marker |
 | `bridge.pid` | Bridge process ID |
@@ -163,3 +166,108 @@ All runtime data lives in `/tmp/ensemble/<team-id>/`:
 | `prompts/*.txt` | Per-agent initial prompts |
 | `delivery/*.txt` | Multi-line prompt delivery files |
 | `.poll-seen` | Poll state tracker |
+
+---
+
+## Event-Driven Architecture (post-refactor)
+
+### The Problem (before)
+
+- File-based polling everywhere: `team-say.sh` writes JSONL, bridge polls and POSTs to API
+- 6 independent polling loops at different intervals
+- Zero real-time messaging; monitor, watchdog, and workflow all polled separately
+- Watchdog could not detect blocking prompts (Y/N dialogs, "Press Enter to continue")
+- ~2-4 second latency for message delivery due to polling intervals
+
+### The Solution (after)
+
+- `appendMessage()` is now `async` and non-blocking
+- After persisting to `feed.jsonl`, immediately emits to `messageBus` (EventEmitter singleton)
+- All subscribers (watchdog, staged workflow, monitor, future consumers) receive messages instantly
+- Watchdog captures tmux pane on nudge to detect blocking prompts and auto-responds
+- BlockingPromptDetector pattern-matches common prompts and sends the appropriate response
+
+### New Modules
+
+| Module | Purpose |
+|---|---|
+| `lib/message-bus.ts` | EventEmitter facade with typed events for messages, agents, teams, phases |
+| `lib/blocking-prompt-detector.ts` | Pattern matching for "Continue? [Y/n]", "Proceed? [y/N]", etc. |
+| `types/messages.ts` | Event and topic types for pub/sub |
+
+### Key Files Changed
+
+| File | Change |
+|---|---|
+| `lib/ensemble-registry.ts` | `appendMessage()` is now `async`; after persist, calls `messageBus.emitMessage()` |
+| `lib/agent-watchdog.ts` | Event-driven idle detection; captures tmux pane on nudge to detect blocking prompts |
+| `lib/staged-workflow.ts` | Polling replaced with `messageBus.on('message', ...)` subscription |
+| `services/ensemble-service.ts` | All `appendMessage` calls are now `await`-ed |
+
+### Events Emitted
+
+```typescript
+// New chat message (from any agent)
+messageBus.on('message', (message: EnsembleMessage) => void)
+
+// Agent blocked at Y/N prompt (watchdog captured pane and auto-responded)
+messageBus.on('agent:blocked', (event: AgentEvent) => void)
+
+// Watchdog nudged an idle agent
+messageBus.on('agent:nudged', (event: AgentEvent) => void)
+
+// Agent marked as stalled after nudge with no recovery
+messageBus.on('agent:stalled', (event: AgentEvent) => void)
+
+// Staged workflow phase advanced or timed out
+messageBus.on('phase:advance', (event: PhaseEvent) => void)
+```
+
+### Blocking Prompt Patterns Detected
+
+| Pattern | Response |
+|---|---|
+| `continue? [Y/n]` | `y` |
+| `proceed? [y/N]` | `n` |
+| `overwrite? [y/N]` | `n` |
+| `skip? [y/N]` | `n` |
+| `cancel? [y/N]` | `n` |
+| `do you want to continue?` | `y` |
+| `confirm? [y/N]` | `y` |
+| `press enter to continue` | `\r` |
+| `hit enter to proceed` | `\r` |
+| `permission denied [y/N]` | `y` (retry) |
+| `sudo password` | `\x03` (Ctrl+C) |
+| `error... retry? [y/N]` | `y` |
+| `failed... try again? [y/N]` | `y` |
+| Generic `[y/N]` | `y` |
+| Generic `?[Y/n]` | `y` |
+
+### Data Flow (post-refactor)
+
+```
+Agent sends message
+       │
+       ▼
+team-say.sh → messages.jsonl (file)
+       │
+       ▼
+ensemble-bridge.sh polls file
+       │
+       ▼
+POST /api/ensemble/teams/:id
+       │
+       ▼
+appendMessage() async persist to feed.jsonl
+       │
+       ├──────────────────────────┐
+       ▼                          ▼
+messageBus.emitMessage()    monitor polls feed.jsonl
+       │                          │
+       ▼                          │
+All subscribers receive         │
+instantly (no polling):          │
+- staged-workflow                │
+- agent-watchdog                  │
+- future consumers               │
+```

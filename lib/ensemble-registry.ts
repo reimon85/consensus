@@ -4,6 +4,7 @@ import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest } from '../types/ensemble'
 import { getEnsembleRegistryDir } from './ensemble-paths'
+import { messageBus } from './message-bus'
 
 const ENSEMBLE_DIR = getEnsembleRegistryDir()
 const TEAMS_FILE = path.join(ENSEMBLE_DIR, 'teams.json')
@@ -131,21 +132,25 @@ export function updateTeam(id: string, updates: Partial<EnsembleTeam>): Ensemble
   })
 }
 
-export function appendMessage(teamId: string, message: EnsembleMessage): void {
+export async function appendMessage(teamId: string, message: EnsembleMessage): Promise<void> {
   const dir = path.join(MESSAGES_DIR, teamId)
   ensureDir(dir)
   const file = path.join(dir, 'feed.jsonl')
-  fs.appendFileSync(file, JSON.stringify(message) + '\n')
+  await fs.promises.appendFile(file, JSON.stringify(message) + '\n')
+  // Emit to messageBus for real-time delivery to subscribers (monitor, watchdog, etc.)
+  messageBus.recordMessage(teamId, message.from)
+  messageBus.emitMessage(message)
 }
 
-export function getMessages(teamId: string, since?: string): EnsembleMessage[] {
+export async function getMessages(teamId: string, since?: string): Promise<EnsembleMessage[]> {
   // Single store: only read from feed.jsonl (canonical source)
   // The old collabMessagesFile (tmp/ensemble/<id>/messages.jsonl) is deprecated
   const feedFile = path.join(MESSAGES_DIR, teamId, 'feed.jsonl')
 
   if (!fs.existsSync(feedFile)) return []
 
-  const lines = fs.readFileSync(feedFile, 'utf-8').trim().split('\n').filter(Boolean)
+  const content = await fs.promises.readFile(feedFile, 'utf-8')
+  const lines = content.trim().split('\n').filter(Boolean)
   let messages: EnsembleMessage[] = []
 
   for (const line of lines) {

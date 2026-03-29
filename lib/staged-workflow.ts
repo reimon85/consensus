@@ -11,6 +11,7 @@ import { resolveAgentProgram } from './agent-config'
 import { collabDeliveryFile } from './collab-paths'
 import { isSelf, getHostById } from './hosts-config'
 import { postRemoteSessionCommand } from './agent-spawner'
+import { messageBus, createPhaseEvent } from './message-bus'
 import fs from 'fs'
 import path from 'path'
 
@@ -125,11 +126,11 @@ export class StagedWorkflowManager {
 
   async run(): Promise<void> {
     if (this.agents.length < 2) {
-      this.log('plan', 'Staged workflow requires at least 2 active agents')
+      await this.log('plan', 'Staged workflow requires at least 2 active agents')
       return
     }
 
-    this.log('plan', 'Starting PLAN phase — agents may only plan and coordinate', 'phase_ack')
+    await this.log('plan', 'Starting PLAN phase — agents may only plan and coordinate', 'phase_ack')
     const planStartedAt = new Date().toISOString()
     await Promise.all(this.agents.map((agent, index) => this.deliverPlanPrompt(agent, index)))
 
@@ -137,17 +138,23 @@ export class StagedWorkflowManager {
       () => this.agentsSharedPlans(planStartedAt),
       this.config.planTimeoutMs,
     )
-    this.log(
+    await this.log(
       'plan',
       planResult === 'condition'
         ? 'All agents shared their plans — advancing to EXEC'
         : `PLAN phase timed out after ${Math.round(this.config.planTimeoutMs / 1000)}s — advancing to EXEC`,
     )
+    messageBus.emitPhaseEvent(createPhaseEvent(
+      this.options.team.id,
+      'plan',
+      planResult === 'condition' ? 'phase_complete' : 'phase_timeout',
+      { nextPhase: 'exec', reason: planResult === 'condition' ? 'all agents shared plans' : 'timeout' },
+    ))
 
     // Reset cursor and cache for next phase
     this.resetCursor()
 
-    this.log('exec', 'Starting EXEC phase — agents may now implement')
+    await this.log('exec', 'Starting EXEC phase — agents may now implement')
     const execStartedAt = new Date().toISOString()
     await Promise.all(this.agents.map((agent, index) => this.deliverExecPrompt(agent, index)))
 
@@ -155,22 +162,28 @@ export class StagedWorkflowManager {
       () => this.agentsCompletedExec(execStartedAt),
       this.config.execTimeoutMs,
     )
-    this.log(
+    await this.log(
       'exec',
       execResult === 'condition'
         ? 'All agents completed implementation — advancing to VERIFY'
         : `EXEC phase timed out after ${Math.round(this.config.execTimeoutMs / 1000)}s — advancing to VERIFY`,
     )
+    messageBus.emitPhaseEvent(createPhaseEvent(
+      this.options.team.id,
+      'exec',
+      execResult === 'condition' ? 'phase_complete' : 'phase_timeout',
+      { nextPhase: 'verify', reason: execResult === 'condition' ? 'all agents completed' : 'timeout' },
+    ))
 
     // Reset cursor and cache for next phase
     this.resetCursor()
 
-    this.log('verify', 'Starting VERIFY phase — agents review each other\'s work')
+    await this.log('verify', 'Starting VERIFY phase — agents review each other\'s work')
     await Promise.all(this.agents.map((agent, index) => this.deliverVerifyPrompt(agent, index)))
 
     if (this.config.verifyTimeoutMs > 0) {
       await this.sleep(this.config.verifyTimeoutMs)
-      this.log('verify', `VERIFY phase window elapsed after ${Math.round(this.config.verifyTimeoutMs / 1000)}s`)
+      await this.log('verify', `VERIFY phase window elapsed after ${Math.round(this.config.verifyTimeoutMs / 1000)}s`)
     }
   }
 
@@ -231,19 +244,19 @@ export class StagedWorkflowManager {
    * On first call for a phase, uses sinceTimestamp. Subsequent polls advance
    * the cursor to the latest message timestamp to avoid re-reading old data.
    */
-  private fetchMessagesSince(sinceTimestamp: string): ReturnType<typeof getMessages> {
+  private async fetchMessagesSince(sinceTimestamp: string): Promise<EnsembleMessage[]> {
     const since = this.messageCursor ?? sinceTimestamp
-    const messages = getMessages(this.options.team.id, since)
+    const messages = await getMessages(this.options.team.id, since)
     if (messages.length > 0) {
       this.messageCursor = messages[messages.length - 1].timestamp
     }
     return messages
   }
 
-  private messageCache: ReturnType<typeof getMessages> = []
+  private messageCache: EnsembleMessage[] = []
 
-  private agentsSharedPlans(sinceTimestamp: string): boolean {
-    const newMessages = this.fetchMessagesSince(sinceTimestamp)
+  private async agentsSharedPlans(sinceTimestamp: string): Promise<boolean> {
+    const newMessages = await this.fetchMessagesSince(sinceTimestamp)
     this.messageCache.push(...newMessages)
     return this.agentNames().every(name =>
       this.messageCache.some(message =>
@@ -252,8 +265,8 @@ export class StagedWorkflowManager {
     )
   }
 
-  private agentsCompletedExec(sinceTimestamp: string): boolean {
-    const newMessages = this.fetchMessagesSince(sinceTimestamp)
+  private async agentsCompletedExec(sinceTimestamp: string): Promise<boolean> {
+    const newMessages = await this.fetchMessagesSince(sinceTimestamp)
     this.messageCache.push(...newMessages)
     return this.agentNames().every(name =>
       this.messageCache.some(message =>
@@ -262,20 +275,68 @@ export class StagedWorkflowManager {
     )
   }
 
-  private async waitForConditionOrTimeout(
-    check: () => boolean,
+  /**
+   * Wait for a condition to be met OR timeout, using event-driven approach.
+   * Subscribes to messageBus events instead of polling at fixed intervals.
+   * More responsive than polling — reacts immediately when agents send messages.
+   */
+  private waitForConditionOrTimeout(
+    check: () => Promise<boolean>,
     timeoutMs: number,
   ): Promise<'condition' | 'timeout'> {
-    const deadline = this.now().getTime() + timeoutMs
-    while (this.now().getTime() < deadline) {
-      if (check()) return 'condition'
-      await this.sleep(this.config.pollIntervalMs)
-    }
-    return 'timeout'
+    return new Promise((resolve) => {
+      const deadline = this.now().getTime() + timeoutMs
+      const teamId = this.options.team.id
+      let settled = false
+
+      // Centralized cleanup — ensures all timers and listeners are released
+      const settle = (result: 'condition' | 'timeout') => {
+        if (settled) return
+        settled = true
+        clearInterval(pollTimer)
+        clearTimeout(ultimateTimeout)
+        messageBus.off('message', handler)
+        resolve(result)
+      }
+
+      const handler = async (message: EnsembleMessage) => {
+        if (message.teamId !== teamId) return
+        if (message.from === 'ensemble') return
+
+        try {
+          if (await check()) {
+            settle('condition')
+          }
+        } catch {
+          // Ignore check errors; keep waiting
+        }
+      }
+
+      messageBus.on('message', handler)
+
+      const pollInterval = Math.min(this.config.pollIntervalMs, 5000)
+      const pollTimer = setInterval(async () => {
+        try {
+          if (await check()) {
+            settle('condition')
+          }
+        } catch {
+          // Ignore
+        }
+
+        if (this.now().getTime() >= deadline) {
+          settle('timeout')
+        }
+      }, pollInterval)
+
+      const ultimateTimeout = setTimeout(() => {
+        settle('timeout')
+      }, timeoutMs)
+    })
   }
 
-  private log(phase: 'plan' | 'exec' | 'verify', content: string, type: EnsembleMessage['type'] = 'chat'): void {
-    appendMessage(this.options.team.id, {
+  private async log(phase: 'plan' | 'exec' | 'verify', content: string, type: EnsembleMessage['type'] = 'chat'): Promise<void> {
+    await appendMessage(this.options.team.id, {
       id: uuidv4(),
       teamId: this.options.team.id,
       from: 'ensemble',

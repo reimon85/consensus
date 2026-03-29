@@ -12,7 +12,7 @@ import {
 const PORT = parseInt(process.env.ENSEMBLE_PORT || process.env.ORCHESTRA_PORT || '23000', 10)
 const HOST = process.env.ENSEMBLE_HOST || '127.0.0.1'
 const RATE_LIMIT_WINDOW_MS = 60_000
-const RATE_LIMIT_MAX_REQUESTS = 100
+const RATE_LIMIT_MAX_REQUESTS = 1000
 const DEFAULT_CORS_ORIGIN_PATTERNS = [
   /^http:\/\/localhost(?::\d+)?$/i,
   /^http:\/\/127\.0\.0\.1(?::\d+)?$/i,
@@ -155,7 +155,7 @@ const server = http.createServer(async (req, res) => {
     if (teamMatch) {
       const teamId = teamMatch[1]
       if (method === 'GET') {
-        const result = getEnsembleTeam(teamId)
+        const result = await getEnsembleTeam(teamId)
         if (result.error) return json(res, { error: result.error }, result.status, origin)
         return json(res, result.data, result.status, origin)
       }
@@ -189,7 +189,7 @@ const server = http.createServer(async (req, res) => {
     const feedMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/feed$/)
     if (feedMatch && method === 'GET') {
       const since = url.searchParams.get('since') || undefined
-      const result = getTeamFeed(feedMatch[1], since)
+      const result = await getTeamFeed(feedMatch[1], since)
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
     }

@@ -3,6 +3,8 @@ import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { AgentRuntime } from './agent-runtime'
 import type { EnsembleMessage, EnsembleTeam } from '../types/ensemble'
+import { detectBlockingPrompt, getResponseForPrompt } from './blocking-prompt-detector'
+import { messageBus, createAgentEvent } from './message-bus'
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000
 const DEFAULT_NUDGE_MS = 90_000
@@ -17,9 +19,9 @@ interface AgentWatchdogState {
 
 interface AgentWatchdogDeps {
   loadTeams: () => EnsembleTeam[]
-  getMessages: (teamId: string) => EnsembleMessage[]
-  appendMessage: (teamId: string, message: EnsembleMessage) => void
-  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile'>
+  getMessages: (teamId: string) => Promise<EnsembleMessage[]>
+  appendMessage: (teamId: string, message: EnsembleMessage) => Promise<void>
+  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile' | 'capturePane'>
   resolveAgentProgram: (program: string) => { inputMethod: 'pasteFromFile' | 'sendKeys' }
   isSelf: (hostId?: string) => boolean
   getHostById: (hostId: string) => { url: string } | undefined
@@ -57,7 +59,9 @@ export class AgentWatchdog {
     this.stallAfterMs = deps.stallAfterMs ?? getWatchdogStallMs()
 
     this.timer = setInterval(() => {
-      void this.poll()
+      void this.poll().catch(err => {
+        console.error('[Watchdog] poll error:', err)
+      })
     }, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS)
     this.timer.unref()
   }
@@ -82,7 +86,7 @@ export class AgentWatchdog {
   }
 
   private async pollTeam(team: EnsembleTeam): Promise<void> {
-    const messages = this.deps.getMessages(team.id)
+    const messages = await this.deps.getMessages(team.id)
     const activeAgents = team.agents.filter(candidate => candidate.status === 'active')
     const activeAgentNames = new Set(activeAgents.map(agent => agent.name))
 
@@ -114,22 +118,26 @@ export class AgentWatchdog {
 
       if (!currentState.nudgedAt && idleMs >= this.nudgeAfterMs) {
         try {
-          await this.nudgeAgent(team, agent.name, agent.program, agent.hostId)
+          await this.nudgeAgent(team, agent, currentState.lastMessageAt)
           this.state.set(stateKey, {
             lastMessageAt,
             nudgedAt: new Date(nowMs).toISOString(),
           })
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err)
-          this.deps.appendMessage(team.id, {
-            id: uuidv4(),
-            teamId: team.id,
-            from: 'ensemble',
-            to: 'team',
-            content: `❌ Watchdog failed to nudge ${agent.name}: ${reason}`,
-            type: 'chat',
-            timestamp: new Date(nowMs).toISOString(),
-          })
+          try {
+            await this.deps.appendMessage(team.id, {
+              id: uuidv4(),
+              teamId: team.id,
+              from: 'ensemble',
+              to: 'team',
+              content: `❌ Watchdog failed to nudge ${agent.name}: ${reason}`,
+              type: 'chat',
+              timestamp: new Date(nowMs).toISOString(),
+            })
+          } catch (appendErr) {
+            console.error('[Watchdog] Failed to log nudge error:', appendErr)
+          }
         }
         continue
       }
@@ -140,7 +148,7 @@ export class AgentWatchdog {
       if (Number.isNaN(nudgedMs) || nowMs - nudgedMs < this.stallAfterMs) continue
 
       console.warn(`[Watchdog] Agent ${agent.name} in team ${team.id} stalled after watchdog nudge`)
-      this.deps.appendMessage(team.id, {
+      await this.deps.appendMessage(team.id, {
         id: uuidv4(),
         teamId: team.id,
         from: 'ensemble',
@@ -149,6 +157,7 @@ export class AgentWatchdog {
         type: 'chat',
         timestamp: new Date(nowMs).toISOString(),
       })
+      messageBus.emitAgentEvent(createAgentEvent('stalled', team.id, agent.name, { idleMs }))
       this.state.set(stateKey, {
         ...currentState,
         stalledAt: new Date(nowMs).toISOString(),
@@ -156,21 +165,26 @@ export class AgentWatchdog {
     }
   }
 
-  private async nudgeAgent(team: EnsembleTeam, agentName: string, _program: string, hostId?: string): Promise<void> {
+  private async nudgeAgent(
+    team: EnsembleTeam,
+    agent: { name: string; program: string; hostId?: string },
+    lastMessageAt: string,
+  ): Promise<void> {
     const timestamp = new Date(this.now()).toISOString()
-    this.deps.appendMessage(team.id, {
+    await this.deps.appendMessage(team.id, {
       id: uuidv4(),
       teamId: team.id,
       from: 'ensemble',
       to: 'team',
-      content: `👀 Watchdog nudged ${agentName}: ${WATCHDOG_NUDGE_TEXT}`,
+      content: `👀 Watchdog nudged ${agent.name}: ${WATCHDOG_NUDGE_TEXT}`,
       type: 'chat',
       timestamp,
     })
+    messageBus.emitAgentEvent(createAgentEvent('nudged', team.id, agent.name, { idleMs: Date.now() - new Date(lastMessageAt).getTime() }))
 
-    const sessionName = `${team.name}-${agentName}`
-    if (hostId && !this.deps.isSelf(hostId)) {
-      const host = this.deps.getHostById(hostId)
+    const sessionName = `${team.name}-${agent.name}`
+    if (agent.hostId && !this.deps.isSelf(agent.hostId)) {
+      const host = this.deps.getHostById(agent.hostId)
       if (host) {
         await this.deps.postRemoteSessionCommand(host.url, sessionName, WATCHDOG_NUDGE_TEXT)
       }
@@ -182,6 +196,35 @@ export class AgentWatchdog {
     const filePath = this.deps.collabDeliveryFile(team.id, sessionName)
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     fs.writeFileSync(filePath, WATCHDOG_NUDGE_TEXT)
+    await runtime.pasteFromFile(sessionName, filePath)
+
+    // After nudging, capture pane and check for blocking prompts
+    // Use a small delay to let the agent process the nudge
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    await this.checkAndUnblockAgent(team, agent.name, sessionName)
+  }
+
+  private async checkAndUnblockAgent(team: EnsembleTeam, agentName: string, sessionName: string): Promise<void> {
+    const runtime = this.deps.getRuntime()
+
+    // Check if the pane contains a blocking prompt
+    const paneContent = await runtime.capturePane(sessionName)
+    if (!paneContent) return
+
+    const detection = detectBlockingPrompt(paneContent)
+    if (!detection.detected) return
+
+    const response = getResponseForPrompt(detection)
+    messageBus.emitAgentEvent(createAgentEvent('blocked', team.id, agentName, {
+      blockedPrompt: detection.matchedText,
+      response,
+    }))
+
+    console.log(`[Watchdog] Detected blocking prompt in ${agentName}: "${detection.matchedText}" -> "${response}"`)
+
+    // Send the response to unblock
+    const filePath = this.deps.collabDeliveryFile(team.id, sessionName)
+    fs.writeFileSync(filePath, response)
     await runtime.pasteFromFile(sessionName, filePath)
   }
 }
