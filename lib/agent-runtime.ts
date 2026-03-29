@@ -198,8 +198,17 @@ export class TmuxRuntime implements AgentRuntime {
     const { literal = false, enter = false } = opts
 
     if (literal) {
+      // For strings containing the actual Escape character (U+001B), use bash $'' quoting
+      // so tmux receives the real escape byte, not a literal \x1b or \e sequence
+      const hasEscape = keys.includes('\x1b') || keys.includes('\u001b')
       const escaped = keys.replace(/'/g, "'\\''")
-      if (enter) {
+      if (hasEscape) {
+        // Use bash $'...' syntax for escape characters so tmux -l receives the real byte
+        const cmd = enter
+          ? `tmux send-keys -t "${sName}" -l $'${escaped}' \\; send-keys -t "${sName}" C-m`
+          : `tmux send-keys -t "${sName}" -l $'${escaped}'`
+        await execAsync(cmd)
+      } else if (enter) {
         await execAsync(
           `tmux send-keys -t "${sName}" -l '${escaped}' \\; send-keys -t "${sName}" C-m`
         )

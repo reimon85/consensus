@@ -2,7 +2,8 @@
   "codex": {
     "name": "codex",
     "command": "codex",
-    "flags": ["--full-auto"],
+    "flags": [],
+    "permissiveFlags": ["--full-auto"],
     "readyMarker": "›",
     "inputMethod": "pasteFromFile",
     "color": "blue",
@@ -11,7 +12,8 @@
   "claude": {
     "name": "claude",
     "command": "claude",
-    "flags": ["--permission-mode", "bypassPermissions"],
+    "flags": [],
+    "permissiveFlags": ["--permission-mode", "bypassPermissions"],
     "readyMarker": "❯",
     "inputMethod": "sendKeys",
     "color": "green",
@@ -29,7 +31,8 @@
   "gemini": {
     "name": "gemini",
     "command": "gemini",
-    "flags": ["--yolo"],
+    "flags": [],
+    "permissiveFlags": ["--yolo"],
     "readyMarker": "Type your message",
     "inputMethod": "pasteFromFile",
     "color": "yellow",

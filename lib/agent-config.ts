@@ -63,24 +63,31 @@ export function resolveAgentProgram(program: string): AgentProgram {
 export function buildAgentCommand(program: string): string {
   const agent = resolveAgentProgram(program)
   const envFlags = (process.env['ENSEMBLE_AGENT_FLAGS'] ?? '').trim()
+  const allowPermissive = process.env['ENSEMBLE_ALLOW_PERMISSIVE_FLAGS'] === 'true'
 
   const envTokens = envFlags ? envFlags.split(/\s+/).filter(Boolean) : []
   const envFlagKeys = new Set(envTokens.filter(token => token.startsWith('-')))
+
+  const activeFlags = [...agent.flags]
+  if (allowPermissive && agent.permissiveFlags) {
+    activeFlags.push(...agent.permissiveFlags)
+  }
+
   const defaultTokens: string[] = []
 
-  for (let i = 0; i < agent.flags.length; i++) {
-    const token = agent.flags[i]
+  for (let i = 0; i < activeFlags.length; i++) {
+    const token = activeFlags[i]
     if (!token.startsWith('-')) {
       defaultTokens.push(token)
       continue
     }
     if (envFlagKeys.has(token)) {
-      if (i + 1 < agent.flags.length && !agent.flags[i + 1].startsWith('-')) i++
+      if (i + 1 < activeFlags.length && !activeFlags[i + 1].startsWith('-')) i++
       continue
     }
     defaultTokens.push(token)
-    if (i + 1 < agent.flags.length && !agent.flags[i + 1].startsWith('-')) {
-      defaultTokens.push(agent.flags[++i])
+    if (i + 1 < activeFlags.length && !activeFlags[i + 1].startsWith('-')) {
+      defaultTokens.push(activeFlags[++i])
     }
   }
 

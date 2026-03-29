@@ -10,6 +10,8 @@ export interface AgentProgram {
   command: string
   /** Default flags appended to the command (e.g. ["-m", "gpt-5.4"]) */
   flags: string[]
+  /** Risky/permissive flags that must be explicitly enabled via ENSEMBLE_ALLOW_PERMISSIVE_FLAGS=true */
+  permissiveFlags?: string[]
   /** String that appears in tmux pane when agent is ready for input */
   readyMarker: string
   /** How to deliver multi-line prompts */

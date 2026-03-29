@@ -193,9 +193,18 @@ export class AgentWatchdog {
 
     // Always use pasteFromFile to avoid shell escaping issues with sendKeys
     const runtime = this.deps.getRuntime()
+    const agentCfg = this.deps.resolveAgentProgram(agent.program)
     const filePath = this.deps.collabDeliveryFile(team.id, sessionName)
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     fs.writeFileSync(filePath, WATCHDOG_NUDGE_TEXT)
+
+    // For pasteFromFile agents (e.g. Gemini CLI), send Escape first to exit any
+    // active shell subprocess before pasting, so the text goes to the main input
+    if (agentCfg.inputMethod === 'pasteFromFile') {
+      await runtime.sendKeys(sessionName, '\x1b', { literal: true })
+      await new Promise(r => setTimeout(r, 300))
+    }
+
     await runtime.pasteFromFile(sessionName, filePath)
 
     // After nudging, capture pane and check for blocking prompts

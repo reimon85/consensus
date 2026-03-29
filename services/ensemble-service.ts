@@ -181,11 +181,11 @@ class EnsembleService {
     if (this.hasTwoRecentCompletionSignals(completionSignals)) {
       return `two completion signals within ${COMPLETION_SIGNAL_WINDOW_MS}ms (idle ${idleForMs}ms)`
     }
-    // Require idle > 5 minutes AND at least 2 completion signals to disband.
+    // Require idle > 2 minutes AND at least 1 completion signal to disband.
     // This prevents premature disband when agents say "done" while still working.
-    if (idleForMs <= 300_000) return false // 5 minutes idle minimum
-    if (completionSignals.length < 2) return false
-    return `multiple completion signals + idle >5min (${idleForMs}ms)`
+    if (idleForMs <= 120_000) return false // 2 minutes idle minimum
+    if (completionSignals.length < 1) return false
+    return `multiple completion signals + idle >2min (${idleForMs}ms)`
   }
 
   private hasCompletionSignal(content: string): boolean {
@@ -373,15 +373,19 @@ export function buildPromptPreview(params: {
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${params.description}`,
     ...roleInstructions,
-    `COMMUNICATION RULES:`,
-    `1. Send findings: ${teamSayCmd} "your message"`,
-    `2. Read teammate messages: ${teamReadCmd}`,
-    `3. After EVERY analysis step, run team-say to share what you found`,
-    `4. After EVERY team-say, run team-read to check for responses`,
-    `5. If teammate shared findings, RESPOND to them`,
-    `6. Keep alternating: analyze, share, read, respond, analyze`,
-    `Start NOW: greet your teammate with team-say, then begin.`,
-  ].join(' ')
+    ``,
+    `CRITICAL INSTRUCTIONS — YOUR JOB IS TO TALK WITH YOUR TEAMMATE:`,
+    `1. Use this command to SEND messages to your teammate: ${teamSayCmd} "YOUR MESSAGE HERE"`,
+    `2. Use this command to READ messages from your teammate: ${teamReadCmd}`,
+    `3. After reading, you MUST respond via team-say — do NOT stay silent`,
+    `4. Always include your analysis/opinion in your team-say messages`,
+    `5. Keep the conversation going — send messages regularly`,
+    ``,
+    `IMPORTANT: The team-say script is at: ${scriptsDir}/team-say.sh`,
+    `Example: ${teamSayCmd} "Hello! My analysis is..."`,
+    ``,
+    `Start NOW by sending your first message to your teammate, then keep the conversation going!`,
+  ].join('\n')
 }
 
 export async function createEnsembleTeam(
@@ -573,21 +577,33 @@ export async function createEnsembleTeam(
         type: 'chat', timestamp: new Date().toISOString(),
       })
 
-      const buildStagedPlanPrompt = (agentName: string, otherNames: string[], agentIndex: number): string => [
-        buildPrompt(agentName, otherNames, agentIndex),
-        `STAGED WORKFLOW MODE.`,
-        `PHASE 1 PLAN: ONLY create and share a plan via team-say.`,
-        `Do NOT write code, edit files, or run mutating commands yet.`,
-        `Both agents must share their plan before implementation begins.`,
-        `After sharing your plan, run team-read and align on the execution approach.`,
-      ].join(' ')
+      const buildStagedPlanPrompt = (agentName: string, otherNames: string[], agentIndex: number): string => {
+        const scriptsDir = path.join(__dirname, '..', 'scripts')
+        const teamSayCmd = `${scriptsDir}/team-say.sh ${team.id} ${agentName}`
+        const teamReadCmd = `${scriptsDir}/team-read.sh ${team.id}`
+        return [
+          buildPrompt(agentName, otherNames, agentIndex),
+          ``,
+          `STAGED WORKFLOW MODE.`,
+          `PHASE 1 PLAN: Create your plan and share it with: ${teamSayCmd} "YOUR PLAN HERE"`,
+          `Do NOT write code, edit files, or run mutating commands yet.`,
+          `Both agents must share their plan via team-say before implementation begins.`,
+          `To read teammate's plan: ${teamReadCmd}`,
+        ].join('\n')
+      }
 
-      const buildStagedExecPrompt = (otherNames: string[]): string => [
-        `PHASE 2 EXEC: Planning is complete.`,
-        `You may now execute the agreed plan and make code changes.`,
-        `Share concrete progress via team-say and explicitly report when your implementation is done.`,
-        `Keep coordinating with ${otherNames.join(', ')} as you work.`,
-      ].join(' ')
+      const buildStagedExecPrompt = (agentName: string, otherNames: string[]): string => {
+        const scriptsDir = path.join(__dirname, '..', 'scripts')
+        const teamSayCmd = `${scriptsDir}/team-say.sh ${team.id} ${agentName}`
+        const teamReadCmd = `${scriptsDir}/team-read.sh ${team.id}`
+        return [
+          `PHASE 2 EXEC: Planning is complete.`,
+          `You may now execute the agreed plan and make code changes.`,
+          `Share progress with: ${teamSayCmd} "What you did, blockers, next steps"`,
+          `Read teammate updates with: ${teamReadCmd}`,
+          `Keep coordinating with ${otherNames.join(', ')} as you work.`,
+        ].join('\n')
+      }
 
       const buildStagedVerifyPrompt = (teammateToReview?: string): string => [
         `PHASE 3 VERIFY: Review ${teammateToReview || 'your teammate'}'s work.`,
@@ -598,7 +614,7 @@ export async function createEnsembleTeam(
       // Run in background so createEnsembleTeam returns immediately
       runStagedWorkflow(team, request.stagedConfig, {
         buildPlanPrompt: ({ agent, teammates, index }) => buildStagedPlanPrompt(agent.name, teammates, index),
-        buildExecPrompt: ({ teammates }) => buildStagedExecPrompt(teammates),
+        buildExecPrompt: ({ agent, teammates }) => buildStagedExecPrompt(agent.name, teammates),
         buildVerifyPrompt: ({ teammateToReview }) => buildStagedVerifyPrompt(teammateToReview),
       }).catch(async err => {
         const message = err instanceof Error ? err.message : String(err)
@@ -719,6 +735,12 @@ export async function sendTeamMessage(
         const tmpFile = collabDeliveryFile(teamId, sessionName)
         fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
         fs.writeFileSync(tmpFile, deliveryText)
+        // Send Escape first to exit any active shell subprocess (e.g. Gemini CLI shell mode)
+        const agentCfg = resolveAgentProgram(targetAgent.program)
+        if (agentCfg.inputMethod === 'pasteFromFile') {
+          await runtime.sendKeys(sessionName, '\x1b', { literal: true })
+          await new Promise(r => setTimeout(r, 300))
+        }
         await runtime.pasteFromFile(sessionName, tmpFile)
       }
     } catch (err) {

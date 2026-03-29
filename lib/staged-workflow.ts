@@ -227,6 +227,10 @@ export class StagedWorkflowManager {
       const tmpFile = collabDeliveryFile(this.options.team.id, sessionName)
       fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
       fs.writeFileSync(tmpFile, text)
+      // Send Escape first to exit any active shell subprocess, ensuring paste
+      // goes to the main TUI input rather than a nested shell
+      await runtime.sendKeys(sessionName, '\x1b', { literal: true })
+      await new Promise(r => setTimeout(r, 300))
       await runtime.pasteFromFile(sessionName, tmpFile)
       return
     }

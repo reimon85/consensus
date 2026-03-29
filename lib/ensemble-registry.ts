@@ -143,24 +143,39 @@ export async function appendMessage(teamId: string, message: EnsembleMessage): P
 }
 
 export async function getMessages(teamId: string, since?: string): Promise<EnsembleMessage[]> {
-  // Single store: only read from feed.jsonl (canonical source)
-  // The old collabMessagesFile (tmp/ensemble/<id>/messages.jsonl) is deprecated
   const feedFile = path.join(MESSAGES_DIR, teamId, 'feed.jsonl')
+  const isolatedFile = path.join('/tmp/ensemble', teamId, 'messages.jsonl')
 
-  if (!fs.existsSync(feedFile)) return []
+  const messages: EnsembleMessage[] = []
+  const seenIds = new Set<string>()
 
-  const content = await fs.promises.readFile(feedFile, 'utf-8')
-  const lines = content.trim().split('\n').filter(Boolean)
-  let messages: EnsembleMessage[] = []
-
-  for (const line of lines) {
+  const readLog = async (file: string) => {
+    if (!fs.existsSync(file)) return
     try {
-      const msg = JSON.parse(line) as EnsembleMessage
-      messages.push(msg)
-    } catch {
-      // Skip malformed lines
-    }
+      const content = await fs.promises.readFile(file, 'utf-8')
+      const lines = content.trim().split('\n').filter(Boolean)
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line) as EnsembleMessage
+          if (msg.id && !seenIds.has(msg.id)) {
+            messages.push(msg)
+            seenIds.add(msg.id)
+          } else if (!msg.id) {
+            // Fallback for messages without ID: use timestamp + from + content hash
+            const fallbackId = `${msg.timestamp}-${msg.from}-${msg.content.slice(0, 32)}`
+            if (!seenIds.has(fallbackId)) {
+              messages.push(msg)
+              seenIds.add(fallbackId)
+            }
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
   }
+
+  // Read feed first (canonical), then isolated (backward compat/scripts)
+  await readLog(feedFile)
+  await readLog(isolatedFile)
 
   // Sort by timestamp (messages without timestamp go to the end)
   messages.sort((a, b) => {
@@ -170,7 +185,7 @@ export async function getMessages(teamId: string, since?: string): Promise<Ensem
   })
 
   if (since) {
-    messages = messages.filter(m => m.timestamp && m.timestamp > since)
+    return messages.filter(m => m.timestamp && m.timestamp > since)
   }
   return messages
 }
